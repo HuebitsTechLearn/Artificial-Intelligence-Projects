@@ -1,0 +1,301 @@
+# No-Code AI Model Builder for SMBs: Conceptual Python Code (Streamlit + PyCaret)
+
+# This code demonstrates the core concept of a No-Code AI Model Builder
+# using Streamlit for the UI and PyCaret for the automated ML backend.
+# A Flask backend for more complex features (user management,
+# persistent storage, advanced deployment) is outlined conceptually.
+
+# To run this code:
+# 1. pip install streamlit pycaret pandas scikit-learn
+# 2. Save this file as, e.g., `app.py`.
+# 3. Run from your terminal: `streamlit run app.py`
+
+import streamlit as st
+import pandas as pd
+from pycaret.classification import * # Import all classification functions
+from pycaret.regression import * # Import all regression functions
+import io
+import base64 # For download links
+
+# --- Flask Backend & Docker (Conceptual) ---
+# A Flask backend (running separately) could handle:
+# - User authentication and management.
+# - Storing uploaded datasets in a persistent storage (e.g., S3, Google Cloud Storage).
+# - Managing trained models (saving, loading, versioning).
+# - Triggering PyCaret jobs (potentially asynchronously via a message queue).
+# - Providing a REST API for deploying models for inference.
+
+# Docker would then containerize this entire setup:
+# - Dockerfile for Streamlit app (Python environment, Streamlit, PyCaret, etc.)
+# - Dockerfile for Flask API (if separate)
+# - Docker Compose to orchestrate both services and a database.
+
+# --- Streamlit UI for No-Code AI Builder ---
+
+st.set_page_config(
+    page_title="AI Model Builder for SMBs",
+    page_icon="🛠️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+st.title("🛠️ No-Code AI Model Builder for SMBs")
+st.markdown("Build, train, and deploy custom AI models on your own data, without writing a single line of code!")
+
+# --- Session State Management ---
+# Use session state to persist data and model objects across reruns
+if 'df_data' not in st.session_state:
+    st.session_state.df_data = None
+if 'setup_done' not in st.session_state:
+    st.session_state.setup_done = False
+if 'best_model' not in st.session_state:
+    st.session_state.best_model = None
+if 'experiment_type' not in st.session_state:
+    st.session_state.experiment_type = None
+
+# --- Section 1: Data Upload ---
+st.header("1. Upload Your Data")
+uploaded_file = st.file_uploader("Upload a CSV file", type=["csv"])
+
+if uploaded_file is not None:
+    try:
+        data = pd.read_csv(uploaded_file)
+        st.session_state.df_data = data.copy() # Store a copy in session state
+        st.success("Data uploaded successfully!")
+        st.write("First 5 rows of your data:")
+        st.dataframe(data.head())
+        st.session_state.setup_done = False # Reset setup if new data uploaded
+        st.session_state.best_model = None
+        st.session_state.experiment_type = None
+
+    except Exception as e:
+        st.error(f"Error reading file: {e}. Please ensure it's a valid CSV.")
+
+# --- Section 2: Configure AI Experiment ---
+if st.session_state.df_data is not None:
+    st.header("2. Configure AI Experiment")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        problem_type = st.radio(
+            "Select Problem Type:",
+            ("Classification (Predict Categories)", "Regression (Predict Numbers)"),
+            key="problem_type_radio"
+        )
+        st.session_state.experiment_type = "classification" if "Classification" in problem_type else "regression"
+    
+    with col2:
+        if st.session_state.df_data is not None:
+            target_column = st.selectbox(
+                "Select Target Column (what you want to predict):",
+                st.session_state.df_data.columns.tolist(),
+                key="target_column_select"
+            )
+            if not target_column:
+                st.warning("Please select a target column to proceed.")
+
+    if st.button("Setup Experiment", key="setup_button"):
+        if st.session_state.df_data is not None and target_column:
+            try:
+                # Initialize PyCaret environment
+                st.info("Setting up PyCaret environment...")
+                if st.session_state.experiment_type == "classification":
+                    # Use a context manager to suppress PyCaret's verbose output in Streamlit directly
+                    with st.spinner("Preparing data for classification..."):
+                        setup(
+                            data=st.session_state.df_data,
+                            target=target_column,
+                            session_id=42, # For reproducibility
+                            silent=True, # Suppress some output
+                            html=False # Don't generate HTML reports in setup directly
+                        )
+                else: # Regression
+                    with st.spinner("Preparing data for regression..."):
+                        setup(
+                            data=st.session_state.df_data,
+                            target=target_column,
+                            session_id=42, # For reproducibility
+                            silent=True,
+                            html=False
+                        )
+                st.session_state.setup_done = True
+                st.success("PyCaret setup complete!")
+                st.write("PyCaret has automatically detected data types and performed preprocessing steps.")
+                
+            except Exception as e:
+                st.error(f"Error during PyCaret setup: {e}")
+                st.session_state.setup_done = False
+        else:
+            st.warning("Please upload data and select a target column first.")
+
+
+# --- Section 3: Train AI Model ---
+if st.session_state.setup_done:
+    st.header("3. Train Your AI Model")
+    st.markdown("PyCaret will automatically compare multiple models and select the best one.")
+
+    if st.button("Train Best Model (AutoML)", key="train_button"):
+        with st.spinner("Training and comparing models... This may take a few minutes."):
+            if st.session_state.experiment_type == "classification":
+                st.session_state.best_model = compare_models()
+            else: # Regression
+                st.session_state.best_model = compare_models()
+        
+        st.success("Model training complete! The best model has been selected.")
+        st.write("Details of the best performing model:")
+        st.write(st.session_state.best_model)
+        
+        # Display evaluation metrics (conceptual, PyCaret's compare_models output is rich)
+        if st.session_state.best_model:
+            st.subheader("Model Evaluation Metrics:")
+            # PyCaret's `pull()` function can get the last displayed results DataFrame
+            try:
+                metrics_df = pull()
+                st.dataframe(metrics_df)
+            except Exception:
+                st.info("Metrics will be displayed after PyCaret's compare_models completes.")
+                
+
+# --- Section 4: Make Predictions & Download Model ---
+if st.session_state.best_model is not None:
+    st.header("4. Make Predictions & Deploy")
+
+    # Predict on unseen data (conceptual)
+    st.subheader("Make Predictions")
+    st.info("You can use the trained model to make predictions on new data.")
+    
+    predict_file = st.file_uploader("Upload new CSV data for prediction", type=["csv"], key="predict_uploader")
+    if predict_file is not None:
+        try:
+            unseen_data = pd.read_csv(predict_file)
+            st.write("First 5 rows of data for prediction:")
+            st.dataframe(unseen_data.head())
+            
+            if st.button("Generate Predictions", key="generate_predictions_button"):
+                with st.spinner("Generating predictions..."):
+                    if st.session_state.experiment_type == "classification":
+                        predictions = predict_model(st.session_state.best_model, data=unseen_data)
+                        st.write("Predictions (including 'prediction_label' and 'prediction_score'):")
+                    else: # Regression
+                        predictions = predict_model(st.session_state.best_model, data=unseen_data)
+                        st.write("Predictions (including 'prediction_label'):")
+                    st.dataframe(predictions.head())
+
+                    # Provide download link for predictions
+                    csv_output = predictions.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="Download Predictions as CSV",
+                        data=csv_output,
+                        file_name="predictions.csv",
+                        mime="text/csv",
+                        key="download_predictions_button"
+                    )
+        except Exception as e:
+            st.error(f"Error processing prediction file: {e}")
+
+    # Download Trained Model
+    st.subheader("Download Trained Model")
+    st.info("Download your trained AI model to use it elsewhere or deploy it.")
+    
+    if st.button("Download Model", key="download_model_button"):
+        try:
+            # PyCaret's save_model function saves the model as a pickle file
+            model_filename = "best_ai_model"
+            if st.session_state.experiment_type == "classification":
+                save_model(st.session_state.best_model, model_name=model_filename, verbose=False)
+            else:
+                save_model(st.session_state.best_model, model_name=model_filename, verbose=False)
+
+            # Create a download link for the saved model file
+            with open(f"{model_filename}.pkl", "rb") as f:
+                model_bytes = f.read()
+            
+            st.download_button(
+                label="Download Trained Model (.pkl)",
+                data=model_bytes,
+                file_name=f"{model_filename}.pkl",
+                mime="application/octet-stream",
+                key="download_model_file_button"
+            )
+            st.success("Model ready for download!")
+        except Exception as e:
+            st.error(f"Error saving/downloading model: {e}")
+
+    st.markdown("---")
+    st.subheader("Conceptual Deployment (For Developers/Advanced Users)")
+    st.markdown("""
+    For production deployment, you would typically:
+    1.  **Host this Streamlit app** (e.g., using Streamlit Cloud, AWS EC2, GCP App Engine).
+    2.  **Integrate with a Flask (or FastAPI) backend** to serve predictions via an API endpoint.
+        * The Flask app would load the downloaded `.pkl` model and use `pycaret.classification.predict_model` (or `pycaret.regression.predict_model`) for inference.
+    3.  **Containerize with Docker** for consistent deployment across environments.
+    """)
+    st.code("""
+# Conceptual Flask API for model deployment (in a separate file, e.g., `api.py`)
+from flask import Flask, request, jsonify
+import pandas as pd
+from pycaret.classification import load_model as load_classification_model, predict_model as predict_classification_model
+from pycaret.regression import load_model as load_regression_model, predict_model as predict_regression_model
+import os
+
+app = Flask(__name__)
+
+# Load your trained model (replace with your model's path and type)
+# Make sure 'best_ai_model.pkl' is available in your deployment environment
+MODEL_PATH = 'best_ai_model.pkl' 
+# You would need to know if it's a classification or regression model
+MODEL_TYPE = 'classification' # or 'regression'
+
+if not os.path.exists(MODEL_PATH):
+    print(f"Warning: Model file not found at {MODEL_PATH}. API will not function.")
+    trained_model = None
+else:
+    if MODEL_TYPE == 'classification':
+        trained_model = load_classification_model(MODEL_PATH, verbose=False)
+    else:
+        trained_model = load_regression_model(MODEL_PATH, verbose=False)
+    print(f"Loaded {MODEL_TYPE} model from {MODEL_PATH}")
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    if trained_model is None:
+        return jsonify({"error": "Model not loaded. Ensure model file exists."}), 500
+
+    try:
+        json_data = request.get_json(force=True)
+        # Assuming input JSON is a dictionary or list of dictionaries
+        # matching your original training data columns (excluding target)
+        data_df = pd.DataFrame(json_data)
+        
+        if MODEL_TYPE == 'classification':
+            predictions = predict_classification_model(trained_model, data=data_df, raw_score=True)
+            # Adjust column names for clarity
+            predictions_output = predictions[['prediction_label', 'prediction_score']].to_dict(orient='records')
+        else:
+            predictions = predict_regression_model(trained_model, data=data_df)
+            predictions_output = predictions[['prediction_label']].to_dict(orient='records')
+
+        return jsonify(predictions_output)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+if __name__ == '__main__':
+    # For Docker deployment, typically run with gunicorn or similar WSGI server
+    # For local testing: app.run(debug=True, host='0.0.0.0', port=5000)
+    print("Flask API conceptual setup. To run this, install Flask and uncomment app.run().")
+    print("Example usage: send POST request to http://localhost:5000/predict with JSON data.")
+
+    # Dockerfile example for a simple Streamlit + PyCaret app:
+    # FROM python:3.9-slim-buster
+    # WORKDIR /app
+    # COPY requirements.txt .
+    # RUN pip install -r requirements.txt
+    # COPY . .
+    # EXPOSE 8501
+    # ENTRYPOINT ["streamlit", "run", "app.py", "--server.port=8501", "--server.enableCORS=false"]
+    """)
+
+st.markdown("---")
+st.markdown("For more details on PyCaret and Streamlit, refer to their official documentation.")
+
