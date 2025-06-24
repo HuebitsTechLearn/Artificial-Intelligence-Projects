@@ -1,0 +1,378 @@
+# Cognitive AI for Personalized Learning Paths: Conceptual Python Code
+
+# This code provides conceptual examples for how the technologies
+# (Reinforcement Learning with TensorFlow, Neo4j, Pandas) would be used.
+
+# IMPORTANT: This is highly simplified and illustrative.
+# A real-world personalized learning system requires:
+# - Comprehensive knowledge graph definition in Neo4j.
+# - Sophisticated RL environment modeling student state and content.
+# - More complex neural networks for the RL agent.
+# - Large datasets of student interactions for training.
+# - Integration with a live learning platform.
+# - Neo4j driver (like 'neo4j' or 'py2neo') and a running Neo4j instance.
+
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tensorflow.keras import layers, models, optimizers
+import random
+import time # For simulating real-time interactions
+
+# --- 1. Conceptual Neo4j Integration (Mockup) ---
+# In a real application, you would use the 'neo4j' driver or 'py2neo' library
+# to connect to a running Neo4j database.
+# For this conceptual example, we will use Python dictionaries to simulate
+# the graph structure.
+
+class Neo4jGraphDBMock:
+    """
+    A simple mock class to simulate Neo4j graph database interactions.
+    In a real system, this would interact with a Neo4j server.
+    """
+    def __init__(self):
+        # Simulate a knowledge graph: Concepts, Resources, Prerequisites
+        self.nodes = {
+            "C1_IntroToAlgebra": {"type": "Concept", "difficulty": "easy"},
+            "C2_LinearEquations": {"type": "Concept", "difficulty": "medium"},
+            "C3_QuadraticEquations": {"type": "Concept", "difficulty": "hard"},
+            "R1_VideoAlgebra": {"type": "Resource", "style": "visual", "content_type": "video", "concept_id": "C1_IntroToAlgebra"},
+            "R2_TextLinear": {"type": "Resource", "style": "textual", "content_type": "article", "concept_id": "C2_LinearEquations"},
+            "R3_QuizQuadratic": {"type": "Resource", "style": "assessment", "content_type": "quiz", "concept_id": "C3_QuadraticEquations"},
+            "R4_ExerciseAlgebra": {"type": "Resource", "style": "practice", "content_type": "exercises", "concept_id": "C1_IntroToAlgebra"},
+            "R5_ExampleQuadratic": {"type": "Resource", "style": "examples", "content_type": "textual", "concept_id": "C3_QuadraticEquations"}
+        }
+        self.relationships = {
+            ("C2_LinearEquations", "REQUIRES", "C1_IntroToAlgebra"): {},
+            ("C3_QuadraticEquations", "REQUIRES", "C2_LinearEquations"): {},
+            ("R1_VideoAlgebra", "EXPLAINS", "C1_IntroToAlgebra"): {},
+            ("R2_TextLinear", "EXPLAINS", "C2_LinearEquations"): {},
+            ("R3_QuizQuadratic", "ASSESSES", "C3_QuadraticEquations"): {},
+            ("R4_ExerciseAlgebra", "PRACTICES", "C1_IntroToAlgebra"): {},
+            ("R5_ExampleQuadratic", "EXPLAINS", "C3_QuadraticEquations"): {}
+        }
+        self.student_profiles = {} # Stores student-specific learning data
+
+        print("Neo4j Graph Database Mockup Initialized with sample content.")
+
+    def get_concept_details(self, concept_id: str) -> dict:
+        return self.nodes.get(concept_id, {})
+
+    def get_resources_for_concept(self, concept_id: str) -> list[dict]:
+        resources = []
+        for (src, rel_type, dest), _ in self.relationships.items():
+            if rel_type in ["EXPLAINS", "ASSESSES", "PRACTICES"] and dest == concept_id:
+                resource_id = src
+                resources.append({**self.nodes.get(resource_id, {}), "id": resource_id})
+        return resources
+    
+    def get_prerequisites(self, concept_id: str) -> list[dict]:
+        prereqs = []
+        for (src, rel_type, dest), _ in self.relationships.items():
+            if rel_type == "REQUIRES" and src == concept_id:
+                prereq_id = dest
+                prereqs.append({**self.nodes.get(prereq_id, {}), "id": prereq_id})
+        return prereqs
+
+    def update_student_profile(self, student_id: str, updates: dict):
+        if student_id not in self.student_profiles:
+            self.student_profiles[student_id] = {
+                "mastery": {}, # e.g., {"C1_IntroToAlgebra": 0.5}
+                "completed_resources": [],
+                "learning_style_pref": None, # e.g., "visual", "textual", "practice"
+                "current_concept": None,
+                "performance_history": [] # e.g., [(timestamp, concept, score, difficulty_offered)]
+            }
+        self.student_profiles[student_id].update(updates)
+        print(f"Student {student_id} profile updated: {updates}")
+
+    def get_student_profile(self, student_id: str) -> dict:
+        return self.student_profiles.get(student_id, {})
+
+graph_db = Neo4jGraphDBMock()
+student_id = "student_A"
+graph_db.update_student_profile(student_id, {"learning_style_pref": "visual", "current_concept": "C1_IntroToAlgebra"})
+student_profile = graph_db.get_student_profile(student_id)
+print(f"Initial Student Profile: {student_profile}")
+
+# --- 2. Reinforcement Learning Environment (Conceptual) ---
+# This class defines the "environment" for the RL agent.
+# The agent interacts with this environment (the learning platform/student).
+
+class LearningEnvironment:
+    def __init__(self, student_id: str, graph_db: Neo4jGraphDBMock):
+        self.student_id = student_id
+        self.graph_db = graph_db
+        self.current_concept_id = graph_db.get_student_profile(student_id).get("current_concept", "C1_IntroToAlgebra")
+        self.mastery_levels = graph_db.get_student_profile(student_id).get("mastery", {})
+        self.learning_style_pref = graph_db.get_student_profile(student_id).get("learning_style_pref", "neutral")
+        
+        # Define possible actions (pedagogical interventions)
+        self.actions = {
+            0: "recommend_easy_resource",
+            1: "recommend_medium_resource",
+            2: "recommend_hard_resource",
+            3: "recommend_quiz",
+            4: "recommend_video",
+            5: "recommend_article",
+            6: "recommend_practice",
+            7: "move_to_next_concept",
+            8: "provide_hint"
+        }
+        self.num_actions = len(self.actions)
+        
+        # Define state features (simplified)
+        # current_mastery, concept_difficulty, time_on_concept, engagement_level, style_match
+        self.state_space_dim = 5 
+        print(f"Learning Environment initialized for student {self.student_id}.")
+
+    def _get_state(self) -> np.ndarray:
+        """
+        Observes the student's current state based on their profile and concept progress.
+        This would be much more sophisticated in a real system.
+        """
+        current_mastery = self.mastery_levels.get(self.current_concept_id, 0.0)
+        concept_details = self.graph_db.get_concept_details(self.current_concept_id)
+        difficulty_map = {"easy": 0.2, "medium": 0.5, "hard": 0.8}
+        concept_difficulty = difficulty_map.get(concept_details.get("difficulty", "medium"), 0.5)
+        
+        # Simulate time_on_concept and engagement (real-time data from LMS)
+        time_on_concept = random.uniform(0.1, 5.0) # Hours
+        engagement_level = random.uniform(0.3, 1.0) # Based on activity, clicks, etc.
+        
+        # Simulate style match based on preferred style and current content style
+        # This is very basic; real style matching is more complex.
+        current_resource_style = "neutral" # Assume previous resource
+        style_match = 1.0 if self.learning_style_pref == current_resource_style else 0.5 # Binary match for simplicity
+
+        state = np.array([current_mastery, concept_difficulty, time_on_concept, engagement_level, style_match])
+        return state
+
+    def step(self, action_idx: int) -> tuple[np.ndarray, float, bool, dict]:
+        """
+        Executes a pedagogical action and returns the new state, reward, and if done.
+        Simulates student response and updates mastery.
+        """
+        action = self.actions[action_idx]
+        reward = 0.0
+        done = False
+        info = {"message": f"Tutor took action: {action}"}
+
+        print(f"\n--- Tutor Action: {action} ---")
+
+        # Simulate the effect of the action on student mastery and engagement
+        current_mastery = self.mastery_levels.get(self.current_concept_id, 0.0)
+        
+        if action == "recommend_easy_resource":
+            print(f"Recommending an easy resource for {self.current_concept_id}.")
+            # Simulate a small mastery gain, positive reward
+            new_mastery = min(1.0, current_mastery + random.uniform(0.05, 0.15))
+            reward = 0.1
+        elif action == "recommend_medium_resource":
+            print(f"Recommending a medium resource for {self.current_concept_id}.")
+            new_mastery = min(1.0, current_mastery + random.uniform(0.1, 0.2))
+            reward = 0.2
+        elif action == "recommend_hard_resource":
+            print(f"Recommending a hard resource for {self.current_concept_id}.")
+            # High reward if student masters, but risk of negative reward if they fail
+            if random.random() > 0.3 + current_mastery * 0.5: # 70% chance of failure if mastery is 0, lower if higher
+                new_mastery = max(0.0, current_mastery - random.uniform(0.05, 0.1)) # Small penalty for struggling
+                reward = -0.5
+                info["message"] += " (Student struggled)"
+            else:
+                new_mastery = min(1.0, current_mastery + random.uniform(0.2, 0.3))
+                reward = 0.5
+                info["message"] += " (Student succeeded)"
+        elif action == "recommend_quiz":
+            print(f"Recommending a quiz for {self.current_concept_id}.")
+            quiz_score = random.uniform(max(0.2, current_mastery - 0.2), min(1.0, current_mastery + 0.2))
+            reward = (quiz_score - 0.5) * 2 # Reward for good performance, penalty for bad
+            new_mastery = quiz_score # Quiz score directly influences mastery
+            info["message"] += f" (Quiz Score: {quiz_score:.2f})"
+        elif action == "move_to_next_concept":
+            if current_mastery >= 0.7: # Only move if mastery is high enough
+                current_concept_details = self.graph_db.get_concept_details(self.current_concept_id)
+                prereqs = self.graph_db.get_prerequisites(current_concept_details.get("id"))
+                next_concept_id = None
+                # Simple logic to find next concept: for demo, hardcode
+                if self.current_concept_id == "C1_IntroToAlgebra":
+                    next_concept_id = "C2_LinearEquations"
+                elif self.current_concept_id == "C2_LinearEquations":
+                    next_concept_id = "C3_QuadraticEquations"
+                
+                if next_concept_id and self.graph_db.get_concept_details(next_concept_id):
+                    self.current_concept_id = next_concept_id
+                    new_mastery = self.mastery_levels.get(self.current_concept_id, 0.0) # Reset mastery for new concept
+                    reward = 1.0 # High reward for progressing
+                    info["message"] += f" (Moved to {self.current_concept_id})"
+                    if self.current_concept_id == "C3_QuadraticEquations" and new_mastery >= 0.7:
+                        done = True # Simulate end of learning path
+                        reward += 10.0 # Bonus for finishing
+                        info["message"] += " (Learning path completed!)"
+                else:
+                    reward = -1.0 # Penalty for trying to move prematurely or no next concept
+                    info["message"] += " (Cannot move, current concept not mastered or no next concept)"
+            else:
+                reward = -0.5 # Penalty for trying to move without mastery
+                info["message"] += " (Mastery too low to move)"
+            new_mastery = current_mastery # Mastery doesn't change if move fails
+        else: # Other actions (hint, video, article, practice)
+            # These actions primarily affect engagement and may indirectly boost mastery
+            reward = 0.05
+            new_mastery = current_mastery + random.uniform(0.01, 0.05) # Small mastery boost
+            info["message"] += " (Provided support)"
+
+        # Update student mastery in mock DB
+        self.mastery_levels[self.current_concept_id] = new_mastery
+        self.graph_db.update_student_profile(self.student_id, {
+            "mastery": self.mastery_levels,
+            "current_concept": self.current_concept_id,
+            "performance_history": self.graph_db.get_student_profile(self.student_id).get("performance_history", []) + 
+                                   [(time.time(), self.current_concept_id, new_mastery, action)]
+        })
+
+        next_state = self._get_state()
+        print(f"  New Mastery for {self.current_concept_id}: {new_mastery:.2f} | Reward: {reward:.2f}")
+        return next_state, reward, done, info
+
+    def reset(self) -> np.ndarray:
+        """Resets the environment for a new learning session."""
+        print("\n--- Resetting Learning Environment ---")
+        self.current_concept_id = self.graph_db.get_student_profile(self.student_id).get("current_concept", "C1_IntroToAlgebra")
+        self.mastery_levels = self.graph_db.get_student_profile(self.student_id).get("mastery", {})
+        # Ensure initial mastery for current concept is set if not present
+        if self.current_concept_id not in self.mastery_levels:
+            self.mastery_levels[self.current_concept_id] = 0.0
+        return self._get_state()
+
+# --- 3. Reinforcement Learning Agent (TensorFlow - Deep Q-Network/DQN Concept) ---
+# This defines a simple DQN agent that learns to choose pedagogical actions.
+
+class DQNAgent:
+    def __init__(self, state_dim: int, action_dim: int, learning_rate: float = 0.001,
+                 gamma: float = 0.99, epsilon: float = 1.0, epsilon_decay: float = 0.995,
+                 epsilon_min: float = 0.01):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.learning_rate = learning_rate
+        self.gamma = gamma # Discount factor
+        self.epsilon = epsilon # Exploration-exploitation trade-off
+        self.epsilon_decay = epsilon_decay
+        self.epsilon_min = epsilon_min
+
+        self.model = self._build_dqn_model()
+        self.target_model = self._build_dqn_model() # For stable training
+        self.update_target_model()
+
+        self.memory = [] # For experience replay (store states, actions, rewards, next_states, dones)
+        self.memory_limit = 2000 # Size of replay buffer
+        self.batch_size = 64 # Size of batch for training from memory
+
+        print(f"DQN Agent Initialized (State Dim: {state_dim}, Action Dim: {action_dim})")
+
+    def _build_dqn_model(self) -> Model:
+        """Builds a simple neural network for the Q-function approximation."""
+        model = models.Sequential([
+            layers.Dense(64, activation='relu', input_shape=(self.state_dim,)),
+            layers.Dense(64, activation='relu'),
+            layers.Dense(self.action_dim, activation='linear') # Output Q-values for each action
+        ])
+        model.compile(loss='mse', optimizer=optimizers.Adam(learning_rate=self.learning_rate))
+        return model
+
+    def update_target_model(self):
+        """Copies weights from the main model to the target model."""
+        self.target_model.set_weights(self.model.get_weights())
+
+    def remember(self, state, action, reward, next_state, done):
+        """Stores experience in replay memory."""
+        self.memory.append((state, action, reward, next_state, done))
+        if len(self.memory) > self.memory_limit:
+            self.memory.pop(0) # Remove oldest experience
+
+    def choose_action(self, state: np.ndarray) -> int:
+        """Chooses an action using epsilon-greedy policy."""
+        if np.random.rand() <= self.epsilon:
+            return random.randrange(self.action_dim) # Explore
+        
+        q_values = self.model.predict(state.reshape(1, -1), verbose=0)[0]
+        return np.argmax(q_values) # Exploit
+
+    def replay(self):
+        """Trains the model using experience replay."""
+        if len(self.memory) < self.batch_size:
+            return
+
+        batch = random.sample(self.memory, self.batch_size)
+        states, actions, rewards, next_states, dones = zip(*batch)
+
+        states = np.array(states)
+        next_states = np.array(next_states)
+        
+        # Predict Q-values for current states
+        current_q_values = self.model.predict(states, verbose=0)
+        # Predict Q-values for next states using target model (for stability)
+        next_q_values = self.target_model.predict(next_states, verbose=0)
+
+        # Create target Q-values
+        target_q_values = np.copy(current_q_values)
+        for i in range(self.batch_size):
+            if dones[i]:
+                target_q_values[i][actions[i]] = rewards[i]
+            else:
+                target_q_values[i][actions[i]] = rewards[i] + self.gamma * np.max(next_q_values[i])
+        
+        # Train the main model
+        self.model.train_on_batch(states, target_q_values)
+
+        # Decay epsilon
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+
+# --- 4. Simulation of Learning Process ---
+
+def simulate_learning_path(episodes: int = 50, steps_per_episode: int = 10):
+    """
+    Simulates a student's learning journey interacting with the AI tutor.
+    """
+    env = LearningEnvironment(student_id, graph_db)
+    agent = DQNAgent(env.state_space_dim, env.num_actions)
+
+    print("\n--- Starting Learning Path Simulation ---")
+    for episode in range(episodes):
+        state = env.reset() # Initial state of the student/learning environment
+        episode_reward = 0
+        done = False
+        step = 0
+
+        print(f"\n--- Episode {episode + 1}/{episodes} ---")
+        while not done and step < steps_per_episode:
+            action = agent.choose_action(state) # Agent chooses pedagogical action
+            next_state, reward, done, info = env.step(action) # Environment reacts
+            
+            agent.remember(state, action, reward, next_state, done) # Store experience
+            state = next_state
+            episode_reward += reward
+            step += 1
+
+            if done:
+                print(f"Episode {episode + 1} finished in {step} steps. Total Reward: {episode_reward:.2f}. {info['message']}")
+            
+            agent.replay() # Train agent from experience replay
+            if episode % 10 == 0 and step % 5 == 0: # Update target model less frequently
+                agent.update_target_model()
+            
+            time.sleep(0.1) # Simulate a small delay for real-time interaction
+
+        if not done:
+            print(f"Episode {episode + 1} ended after {steps_per_episode} steps. Total Reward: {episode_reward:.2f}.")
+
+    print("\n--- Learning Path Simulation Complete ---")
+    print("Final simulated student mastery for current concept:", 
+          graph_db.get_student_profile(student_id).get("mastery"))
+    print("Final Epsilon (exploration rate):", agent.epsilon)
+    print("\nNote: In a real system, the trained agent's model would be deployed to recommend actions.")
+    # You could save the trained model: agent.model.save("adaptive_tutor_agent_model.h5")
+
+# Run the simulation
+simulate_learning_path(episodes=50, steps_per_episode=15)
