@@ -1,0 +1,500 @@
+# Save this content as: actions.py (for custom actions)
+# And some components as: custom_nlu_components.py (for custom NLU components)
+
+import os
+import requests
+import json
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+# Rasa SDK imports
+from rasa_sdk import Action, Tracker
+from rasa_sdk.executor import CollectingDispatcher
+from rasa_sdk.events import SlotSet, UserUtteranceReverted
+from rasa.nlu.components import Component
+from rasa.shared.nlu.training_data.message import Message
+from rasa.shared.nlu.constants import TEXT
+
+# External library imports
+import fasttext # For language detection
+from transformers import pipeline # For BERT emotion detection
+import openai # For OpenAI Whisper
+import numpy as np # For numerical operations
+from typing import Any, Optional, Text, Dict, List
+
+# --- Configuration for External APIs ---
+# Set your OpenAI API key as an environment variable (recommended for production)
+# For local testing, you might temporarily set it here, but AVOID this in real deployments.
+# os.environ["OPENAI_API_KEY"] = "YOUR_OPENAI_API_KEY_HERE"
+
+# Gemini API for translation (preferred over Google Cloud Translate for LLM-based translation)
+# Note: For actual deployment, the API key management will be handled by the Canvas environment.
+# Leave it as an empty string here.
+GEMINI_API_KEY = "" # The Canvas environment will inject this at runtime for Gemini API calls
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+
+# --- Helper Function for Asynchronous Operations (for API calls) ---
+# Rasa custom actions run synchronously, so we use asyncio for external API calls
+# to prevent blocking the action server.
+executor = ThreadPoolExecutor(max_workers=5) # Adjust worker count as needed
+
+def run_sync_in_async(func, *args, **kwargs):
+    """Runs a synchronous function in an async context."""
+    loop = asyncio.get_event_loop()
+    return loop.run_in_executor(executor, func, *args, **kwargs)
+
+# --- Custom NLU Components (Save this in `custom_nlu_components.py`) ---
+
+class FastTextLanguageDetector(Component):
+    """
+    A custom NLU component for language detection using FastText.
+    This component will automatically detect the language of the user's message
+    and set the 'detected_language' slot.
+    """
+    name = "FastTextLanguageDetector"
+    defaults = {"model_path": "models/lid.176.bin", "min_confidence": 0.7}
+
+    def __init__(self, component_config: Optional[Dict[Text, Any]] = None):
+        super().__init__(component_config)
+        self.model_path = self.component_config.get("model_path")
+        self.min_confidence = self.component_config.get("min_confidence")
+        self.model = None
+        try:
+            # Check if the model exists, if not, provide instructions to download
+            if not os.path.exists(self.model_path):
+                print(f"FastText model not found at {self.model_path}. Please download 'lid.176.bin' from "
+                      f"https://fasttext.cc/docs/en/language-identification.html and place it in the '{os.path.dirname(self.model_path)}' directory.")
+            else:
+                self.model = fasttext.load_model(self.model_path)
+                print(f"Loaded FastText language detection model from {self.model_path}")
+        except Exception as e:
+            print(f"Error loading FastText model: {e}. Language detection will be skipped.")
+            self.model = None # Ensure model is None if loading fails
+
+    def process(self, message: Message, **kwargs: Any) -> None:
+        """Process the incoming message and add language information."""
+        text = message.get(TEXT)
+        if not self.model or not text or not text.strip():
+            message.set("detected_language", "en", add_to_output=True) # Default to English if no model or empty text
+            return
+
+        try:
+            predictions = self.model.predict(text)
+            detected_lang = predictions[0][0].replace('__label__', '')
+            confidence = predictions[1][0]
+            
+            if confidence >= self.min_confidence:
+                message.set("detected_language", detected_lang, add_to_output=True)
+                print(f"Detected language: '{detected_lang}' (Confidence: {confidence:.2f}) for text: '{text[:50]}...'")
+            else:
+                # If confidence is low, default to English or 'unknown'
+                message.set("detected_language", "en", add_to_output=True) 
+                print(f"Low confidence ({confidence:.2f}) for language detection of '{text[:50]}...', defaulting to 'en'.")
+        except Exception as e:
+            print(f"Error during FastText language prediction for '{text[:50]}...': {e}")
+            message.set("detected_language", "en", add_to_output=True) # Default on error
+
+
+class BERTEmotionClassifier(Component):
+    """
+    A custom NLU component for emotion classification using a Hugging Face BERT model.
+    This component will classify the emotion of the user's message and set the 'detected_emotion' slot.
+    Requires a pre-trained or fine-tuned BERT model for emotion classification.
+    """
+    name = "BERTEmotionClassifier"
+    # Example model: "j-hartmann/emotion-english-distilroberta-base" for English emotions
+    # For multilingual, you'd fine-tune 'bert-base-multilingual-cased' on multilingual emotion data
+    # or use a pre-existing multilingual emotion model if available on HF.
+    # For this demo, we'll use a generic classification and advise on fine-tuning.
+    defaults = {"model_name": "distilbert-base-uncased-finetuned-sst-2-english"} # Placeholder, replace with actual emotion model
+    # ^ This model is for sentiment (positive/negative), not granular emotions.
+    # For granular emotions, you'd need a model specifically trained for it.
+    # Example: "cardiffnlp/twitter-roberta-base-emotion" (English only)
+    # For multilingual emotion, training your own on a labeled dataset is often required.
+
+    def __init__(self, component_config: Optional[Dict[Text, Any]] = None):
+        super().__init__(component_config)
+        self.model_name = self.component_config.get("model_name")
+        self.emotion_pipeline = None
+        try:
+            self.emotion_pipeline = pipeline("text-classification", 
+                                             model=self.model_name, 
+                                             tokenizer=self.model_name,
+                                             return_all_scores=True) # return_all_scores for detailed output
+            print(f"Loaded BERT emotion/sentiment model: {self.model_name}")
+            print("NOTE: For full emotion detection (joy, sadness, anger, etc.), "
+                  "you need a BERT model specifically fine-tuned on a granular emotion dataset "
+                  "and potentially for multiple languages.")
+        except Exception as e:
+            print(f"Error loading BERT emotion/sentiment model '{self.model_name}': {e}.")
+            print("Emotion detection will be skipped or default to 'neutral'.")
+            self.emotion_pipeline = None
+
+    def process(self, message: Message, **kwargs: Any) -> None:
+        """Process the incoming message and add emotion/sentiment information."""
+        text = message.get(TEXT)
+        if not self.emotion_pipeline or not text or not text.strip():
+            message.set("detected_emotion", "neutral", add_to_output=True) # Default to neutral
+            return
+
+        try:
+            predictions = self.emotion_pipeline(text)
+            if predictions and predictions[0]:
+                # Assuming the model outputs scores for different labels
+                top_prediction = max(predictions[0], key=lambda x: x['score'])
+                detected_emotion_label = top_prediction['label'].lower() # e.g., 'positive', 'negative'
+                confidence = top_prediction['score']
+
+                # Map sentiment to a more generic emotion-like label for tone adaptation
+                if "positive" in detected_emotion_label:
+                    mapped_emotion = "joy"
+                elif "negative" in detected_emotion_label:
+                    mapped_emotion = "frustration"
+                else:
+                    mapped_emotion = "neutral" # Default for other labels or low confidence
+
+                message.set("detected_emotion", mapped_emotion, add_to_output=True)
+                print(f"Detected sentiment/emotion: '{mapped_emotion}' (Original: {detected_emotion_label}, Confidence: {confidence:.2f}) for text: '{text[:50]}...'")
+            else:
+                message.set("detected_emotion", "neutral", add_to_output=True)
+        except Exception as e:
+            print(f"Error during BERT emotion/sentiment prediction for '{text[:50]}...': {e}")
+            message.set("detected_emotion", "neutral", add_to_output=True)
+
+
+# --- Custom Actions (Save this in `actions.py`) ---
+
+class ActionTranscribeAudio(Action):
+    """
+    Rasa custom action to transcribe audio input using OpenAI Whisper.
+    This action assumes the custom connector provides audio data (e.g., base64 string or file path)
+    in the message metadata under 'audio_input'.
+    """
+    def name(self) -> Text:
+        return "action_transcribe_audio"
+
+    async def run(
+        self, dispatcher: CollectingDispatcher, tracker: Tracker, domain: Dict[Text, Any]
+    ) -> List[Dict[Text, Any]]:
+        # In a real web integration, audio would be sent by the frontend
+        # For this example, we'll simulate audio input.
+        # In a real setup, `audio_input` would be a BytesIO object or a file path
+        # from the connector.
+        audio_input_path = tracker.latest_message.get("metadata", {}).get("audio_input_path")
+
+        if not audio_input_path or not os.path.exists(audio_input_path):
+            dispatcher.utter_message(text="Sorry, I need an audio file path to transcribe. Please provide one or type your message.")
+            print("No valid audio input path provided in message metadata.")
+            return []
+
+        print(f"Attempting to transcribe audio from: {audio_input_path}")
+        try:
+            # Using run_sync_in_async to run blocking OpenAI call in a non-blocking way
+            with open(audio_input_path, "rb") as audio_file:
+                transcription_response = await run_sync_in_async(
+                    lambda: openai.audio.transcriptions.create(
+                        model="whisper-1", 
+                        file=audio_file,
+                        response_format="text"
+                    )
+                )
+                transcribed_text = transcription_response
+            
+            print(f"Whisper Transcription: {transcribed_text[:100]}...")
+            dispatcher.utter_message(text=f"You said: '{transcribed_text}'") # Echo for debugging
+
+            # Set the transcribed text as the user's new message for Rasa NLU processing
+            # This is critical: Rasa will then process this text for intent/entities.
+            return [UserUtteranceReverted(), SlotSet(TEXT, transcribed_text)] # TEXT is a constant for latest message text
+
+        except openai.AuthenticationError:
+            dispatcher.utter_message(text="My audio transcription service isn't authenticated. Please check the API key.")
+            print("OpenAI API Key is missing or invalid.")
+        except Exception as e:
+            dispatcher.utter_message(text=f"Sorry, I had trouble transcribing your audio. Error: {e}")
+            print(f"Whisper transcription error: {e}")
+        return [UserUtteranceReverted()] # Revert previous user utterance to allow re-entry
+
+class ActionRespondEmpathetically(Action):
+    """
+    Rasa custom action to generate an empathetic, multilingual response.
+    This action retrieves the detected emotion and language from slots
+    and adapts the bot's response tone and language accordingly.
+    """
+    def name(self) -> Text:
+        return "action_respond_empathetically"
+
+    async def run(
+        self, dispatcher: CollectingDispatcher, tracker: Tracker, domain: Dict[Text, Any]
+    ) -> List[Dict[Text, Any]]:
+
+        # Get detected emotion and language from slots
+        detected_emotion = tracker.get_slot("detected_emotion") or "neutral"
+        detected_language = tracker.get_slot("detected_language") or "en" # Default to English
+
+        # Get the intent of the current message
+        latest_intent = tracker.latest_message.get("intent", {}).get("name")
+        print(f"Responding for intent: {latest_intent}, Emotion: {detected_emotion}, Language: {detected_language}")
+
+        # Define a base response based on intent or a fallback
+        base_response_text = ""
+        if latest_intent == "greet":
+            base_response_text = "Hello! How can I assist you today?"
+        elif latest_intent == "goodbye":
+            base_response_text = "Goodbye! Have a great day."
+        elif latest_intent == "ask_about_product":
+            product = tracker.get_slot("product_name")
+            if product:
+                base_response_text = f"You're asking about '{product}'. What specifically would you like to know?"
+            else:
+                base_response_text = "Which product are you interested in?"
+        # Add more intent-specific base responses here
+        elif latest_intent: # For any other recognized intent
+             base_response_text = f"Regarding your query about {latest_intent}, I can help you with that."
+        else: # Fallback if no intent is recognized
+            base_response_text = "I'm not sure how to respond to that. Can you please elaborate?"
+
+
+        # Adapt tone based on emotion
+        adapted_response_text = base_response_text
+        if detected_emotion == "frustration":
+            adapted_response_text = f"I hear your frustration. {base_response_text} Let's try to resolve this together."
+        elif detected_emotion == "joy":
+            adapted_response_text = f"That's wonderful to hear! {base_response_text}"
+        elif detected_emotion == "sadness":
+            adapted_response_text = f"I'm sorry you're feeling sad. {base_response_text} Is there anything specific that's bothering you?"
+        # Add more emotion-specific adaptations. Use more varied phrasing.
+
+        # Translate the response if the detected language is not English
+        final_response_text = adapted_response_text
+        if detected_language != "en":
+            print(f"Attempting to translate response to {detected_language}...")
+            translated_text = await self._translate_text_gemini(adapted_response_text, detected_language)
+            if translated_text:
+                final_response_text = translated_text
+            else:
+                print(f"Gemini translation failed for {detected_language}, sending English response.")
+
+        dispatcher.utter_message(text=final_response_text)
+
+        return []
+
+    async def _translate_text_gemini(self, text: Text, target_language: Text) -> Optional[Text]:
+        """
+        Translates text using the Gemini API.
+        This uses the LLM to perform translation, which can be more nuanced than
+        traditional translation APIs for certain tasks.
+        """
+        if not GEMINI_API_KEY:
+            print("Gemini API key not set. Cannot perform translation.")
+            return None
+
+        prompt = f"Translate the following text into {target_language}. Only provide the translated text, nothing else. Text: '{text}'"
+        chat_history = [{"role": "user", "parts": [{"text": prompt}]}]
+        
+        payload = {
+            "contents": chat_history,
+            "generationConfig": {
+                "responseMimeType": "text/plain" # We expect plain text translated output
+            }
+        }
+        headers = { 'Content-Type': 'application/json' }
+
+        try:
+            # Use run_sync_in_async to make the HTTP request non-blocking
+            response = await run_sync_in_async(
+                lambda: requests.post(GEMINI_API_URL, headers=headers, data=json.dumps(payload), timeout=15)
+            )
+            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+            result = response.json()
+            
+            if result.get("candidates") and result["candidates"][0].get("content") and result["candidates"][0]["content"].get("parts"):
+                translated_text = result["candidates"][0]["content"]["parts"][0]["text"]
+                return translated_text
+            else:
+                print(f"Gemini API response structure unexpected: {result}")
+                return None
+        except requests.exceptions.Timeout:
+            print("Gemini API request timed out.")
+            return None
+        except requests.exceptions.RequestException as e:
+            print(f"Gemini API request failed: {e}")
+            return None
+        except Exception as e:
+            print(f"An unexpected error occurred during Gemini translation: {e}")
+            return None
+
+
+# --- Instructions for Rasa Project Setup ---
+
+# 1. Create a Rasa project:
+#    Open your terminal and run: `rasa init`
+#    This will create a basic Rasa project structure.
+
+# 2. Place the custom components and actions:
+#    - Create a new file named `custom_nlu_components.py` in your Rasa project root.
+#      Copy the `FastTextLanguageDetector` and `BERTEmotionClassifier` classes into it.
+#    - Replace the content of `actions.py` (usually in the project root) with the `ActionTranscribeAudio`
+#      and `ActionRespondEmpathetically` classes provided above.
+
+# 3. Download FastText Language Identification Model:
+#    Download `lid.176.bin` from https://fasttext.cc/docs/en/language-identification.html
+#    Create a directory named `models/` in your Rasa project root if it doesn't exist.
+#    Place `lid.176.bin` inside the `models/` directory.
+
+# 4. Set up BERT Emotion Model (Crucial Step):
+#    For granular emotion detection, you need a BERT model fine-tuned on an emotion dataset.
+#    Option A: Fine-tune `bert-base-multilingual-cased` on a multilingual emotion dataset (e.g., a combination of GoEmotions, ISEAR translated). This is a significant ML task.
+#    Option B: If you find a suitable *multilingual* emotion classification model on Hugging Face,
+#              update the `defaults` for `BERTEmotionClassifier` in `custom_nlu_components.py`
+#              to point to that model's name (e.g., `model_name: "some/multilingual-emotion-model"`).
+#              The current `distilbert-base-uncased-finetuned-sst-2-english` is for English sentiment (pos/neg),
+#              and serves as a placeholder to demonstrate the pipeline integration.
+
+# 5. Update `config.yml`:
+#    Modify your `config.yml` to include the custom components and BERT featurizer:
+#    ```yaml
+#    # config.yml
+#    language: en # This primarily sets the default language for some Rasa internals.
+#                  # Our custom components handle multilingual aspects.
+#    
+#    pipeline:
+#      - name: WhitespaceTokenizer
+#      - name: LanguageModelFeaturizer # For BERT features for DIETClassifier
+#        model_name: "bert-base-multilingual-cased"
+#        model_weights: "bert-base-multilingual-cased"
+#      
+#      - name: "custom_nlu_components.FastTextLanguageDetector" # Your custom language detector
+#        model_path: "models/lid.176.bin"
+#        min_confidence: 0.7 # Adjust as needed
+#
+#      - name: "custom_nlu_components.BERTEmotionClassifier" # Your custom emotion classifier
+#        # Replace with your actual multilingual emotion model if available or fine-tuned
+#        model_name: "distilbert-base-uncased-finetuned-sst-2-english" # Placeholder for demo
+#        # labels: ["anger", "disgust", "fear", "joy", "neutral", "sadness", "surprise"] # If your model uses these labels
+#
+#      - name: DIETClassifier
+#        epochs: 100
+#        constrain_similarities: true
+#
+#      - name: EntitySynonymMapper
+#      - name: ResponseSelector
+#        epochs: 50
+#
+#    policies:
+#      - name: MemoizationPolicy
+#      - name: RulePolicy
+#      - name: TEDPolicy
+#        epochs: 100
+#        constrain_similarities: true
+#    ```
+
+# 6. Update `domain.yml`:
+#    Add the necessary slots and define responses.
+#    ```yaml
+#    # domain.yml
+#    intents:
+#      - greet
+#      - goodbye
+#      - ask_about_product
+#      - express_frustration
+#      - express_joy
+#      - express_sadness # Add more emotion intents if you train Rasa for them
+#      - inform # General purpose intent for information
+#      # ... other intents
+#
+#    entities:
+#      - product_name
+#
+#    slots:
+#      detected_language:
+#        type: text
+#        initial_value: "en"
+#        influence_conversation: true
+#      detected_emotion:
+#        type: text
+#        initial_value: "neutral"
+#        influence_conversation: true
+#      
+#      # This slot is for passing transcribed text back to Rasa's NLU pipeline
+#      text_input_from_audio:
+#        type: text
+#        influence_conversation: true # Allow NLU to process this
+#
+#    responses:
+#      utter_greet:
+#        - text: "Hello! How can I assist you today?"
+#      # ... other standard responses
+#      # The empathetic responses are handled by action_respond_empathetically
+#
+#    actions:
+#      - action_transcribe_audio
+#      - action_respond_empathetically
+#    ```
+
+# 7. Update NLU Training Data (`data/nlu.yml`):
+#    Add training examples. Ensure you have examples for different intents.
+#    For voice input, the `action_transcribe_audio` will turn audio into text that then
+#    gets processed by the existing NLU pipeline.
+
+# 8. Update Stories and Rules (`data/stories.yml`, `data/rules.yml`):
+#    Crucially, ensure your stories and rules call `action_respond_empathetically`
+#    instead of standard `utter_` responses, especially when emotion adaptation is desired.
+#    Also, add rules to handle `action_transcribe_audio` being called.
+#    ```yaml
+#    # data/stories.yml (example fragment)
+#    - story: User expresses joy and asks about product
+#      steps:
+#        - intent: greet
+#        - action: action_respond_empathetically # Bot responds with empathetic greeting
+#        - intent: express_joy
+#        - action: action_respond_empathetically # Bot adapts tone for joy
+#        - intent: ask_about_product
+#          entities:
+#            - product_name: "headset"
+#        - action: action_respond_empathetically
+#        - intent: goodbye
+#        - action: action_respond_empathetically
+#
+#    # data/rules.yml (example fragment)
+#    - rule: Handle any greeting
+#      steps:
+#        - intent: greet
+#        - action: action_respond_empathetically
+#
+#    - rule: Respond empathetically to detected frustration
+#      condition:
+#        - slot_was_set:
+#            - detected_emotion: frustration
+#      steps:
+#        - action: action_respond_empathetically
+#    
+#    - rule: Handle audio transcription request (if you have a voice connector that triggers this)
+#      # This rule is if your voice connector specifically sends an intent like 'voice_input'
+#      # and then the action processes the audio.
+#      # Or, the connector directly sets the 'audio_input_path' in metadata and triggers 'action_transcribe_audio'.
+#      steps:
+#        - action: action_transcribe_audio
+#        - checkpoint: after_audio_transcription # To continue flow after transcription
+#    ```
+
+# 9. Install Python Dependencies:
+#    `pip install rasa-sdk fasttext transformers openai`
+
+# 10. Train Your Rasa Model:
+#     In your terminal, navigate to your Rasa project root and run:
+#     `rasa train`
+
+# 11. Run Rasa Action Server (in a separate terminal):
+#     `rasa run actions`
+
+# 12. Run Rasa Chatbot:
+#     `rasa shell`
+#     For testing `action_transcribe_audio`, you would need a custom connector (e.g., a web widget)
+#     that sends audio data to Rasa, or you can manually trigger the action and set the slot
+#     in `rasa shell` for testing.
+#     To simulate audio input in `rasa shell` (for testing `action_transcribe_audio`):
+#     You'd need a dummy audio file (e.g., a short `.wav` file).
+#     Then, in a custom Rasa channel or during testing:
+#     `user_uttered: /greet {"metadata": {"audio_input_path": "/path/to/your/dummy_audio.wav"}}`
+#     This is a simplified way to represent how a connector would pass audio metadata.
