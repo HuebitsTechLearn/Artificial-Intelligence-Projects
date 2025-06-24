@@ -1,0 +1,310 @@
+# AI-Powered Supply Chain Optimizer: Conceptual Python Code Examples
+
+# This code provides conceptual examples for how the technologies mentioned in the
+# "AI-Powered Supply Chain Optimizer" project overview would be used.
+# Building a full-fledged system requires extensive data, model training,
+# integration, and a robust production environment.
+
+# Key libraries:
+# - Pandas: For data manipulation and preparation.
+# - Prophet: For time-series demand forecasting.
+# - XGBoost: For advanced demand forecasting and disruption prediction.
+# - Gurobi: For mathematical optimization (requires Gurobi license and installation).
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from datetime import timedelta
+
+# --- 1. Data Simulation/Loading (Pandas) ---
+# In a real scenario, this data would be loaded from databases, ERP systems,
+# or data lakes (e.g., CSV, SQL, S3).
+# Here, we simulate historical sales data for demonstration.
+
+def generate_simulated_sales_data(num_days=365*2, product_id="P001"):
+    """
+    Generates simulated daily sales data with trend, seasonality, and some noise.
+    """
+    dates = pd.to_datetime(pd.date_range(start="2023-01-01", periods=num_days, freq="D"))
+    
+    # Base sales with an upward trend
+    sales = 50 + np.arange(num_days) * 0.1
+    
+    # Weekly seasonality
+    sales += 10 * np.sin(np.arange(num_days) / 7 * 2 * np.pi)
+    
+    # Yearly seasonality
+    sales += 20 * np.sin(np.arange(num_days) / 365 * 2 * np.pi)
+    
+    # Holidays (simple example: boost on Christmas)
+    christmas_dates = [d for d in dates if d.month == 12 and d.day == 25]
+    for c_date in christmas_dates:
+        sales[dates == c_date] += 50
+        sales[dates == c_date - timedelta(days=1)] += 20 # Day before Christmas
+    
+    # Noise
+    sales += np.random.normal(0, 5, num_days)
+    
+    # Ensure sales are non-negative
+    sales = np.maximum(0, sales).astype(int)
+    
+    df = pd.DataFrame({'ds': dates, 'y': sales, 'product_id': product_id})
+    return df
+
+print("--- Data Simulation (Pandas) ---")
+sales_data = generate_simulated_sales_data()
+print(sales_data.head())
+print(f"Total records: {len(sales_data)}")
+
+# --- 2. Demand Forecasting ---
+
+# a. Prophet for Time-Series Forecasting
+print("\n--- Demand Forecasting (Prophet) ---")
+try:
+    from prophet import Prophet
+    # Prophet requires 'ds' (datestamp) and 'y' (target variable) columns
+    prophet_df = sales_data[['ds', 'y']]
+
+    # Initialize and fit the model
+    model_prophet = Prophet(
+        yearly_seasonality=True,
+        weekly_seasonality=True,
+        daily_seasonality=False # Often not needed for daily sales, adjust as per data
+    )
+    
+    # Add custom holidays if available (e.g., from a separate holiday calendar)
+    # Example:
+    # holidays = pd.DataFrame({
+    #   'holiday': 'christmas',
+    #   'ds': pd.to_datetime(['2023-12-25', '2024-12-25']),
+    #   'lower_window': 0,
+    #   'upper_window': 1,
+    # })
+    # model_prophet.add_country_holidays(country_name='US') # Or use built-in country holidays
+    
+    model_prophet.fit(prophet_df)
+
+    # Create future dataframe for predictions (e.g., next 30 days)
+    future = model_prophet.make_future_dataframe(periods=30)
+    forecast_prophet = model_prophet.predict(future)
+
+    print("Prophet Forecast (first 5 future predictions):")
+    print(forecast_prophet[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(5))
+
+    # Plot the forecast (optional visualization)
+    fig1 = model_prophet.plot(forecast_prophet)
+    plt.title("Prophet Demand Forecast")
+    plt.xlabel("Date")
+    plt.ylabel("Sales")
+    # plt.show() # Uncomment to display plot
+
+    fig2 = model_prophet.plot_components(forecast_prophet)
+    # plt.show() # Uncomment to display plot components
+
+except ImportError:
+    print("Prophet library not installed. Please install with: pip install prophet")
+except Exception as e:
+    print(f"Error during Prophet forecasting: {e}")
+
+
+# b. XGBoost for Advanced Demand Forecasting
+# XGBoost can incorporate more features (e.g., promotions, price changes, weather)
+# For this, we'll create some basic features from the date.
+print("\n--- Demand Forecasting (XGBoost) ---")
+try:
+    import xgboost as xgb
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import mean_squared_error
+
+    # Create features for XGBoost
+    xgb_df = sales_data.copy()
+    xgb_df['year'] = xgb_df['ds'].dt.year
+    xgb_df['month'] = xgb_df['ds'].dt.month
+    xgb_df['day'] = xgb_df['ds'].dt.day
+    xgb_df['dayofweek'] = xgb_df['ds'].dt.dayofweek
+    xgb_df['dayofyear'] = xgb_df['ds'].dt.dayofyear
+    xgb_df['weekofyear'] = xgb_df['ds'].dt.isocalendar().week.astype(int)
+    
+    # Add dummy features for holidays (conceptual)
+    xgb_df['is_christmas'] = ((xgb_df['month'] == 12) & (xgb_df['day'] == 25)).astype(int)
+    # Add more external features if available (e.g., 'promotion_flag', 'price_change', 'competitor_activity')
+
+    features = ['year', 'month', 'day', 'dayofweek', 'dayofyear', 'weekofyear', 'is_christmas']
+    target = 'y'
+
+    X = xgb_df[features]
+    y = xgb_df[target]
+
+    # Split data into training and testing sets
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # Initialize and train XGBoost Regressor
+    model_xgb = xgb.XGBRegressor(
+        objective='reg:squarederror',
+        n_estimators=100,
+        learning_rate=0.1,
+        random_state=42
+    )
+    model_xgb.fit(X_train, y_train)
+
+    # Make predictions
+    predictions_xgb = model_xgb.predict(X_test)
+    rmse_xgb = np.sqrt(mean_squared_error(y_test, predictions_xgb))
+    print(f"XGBoost RMSE on test data: {rmse_xgb:.2f}")
+
+    # To forecast future demand with XGBoost, you'd create a future DataFrame
+    # with the same features and then call model_xgb.predict(X_future)
+    print("XGBoost model trained for demand forecasting.")
+
+except ImportError:
+    print("XGBoost or Scikit-learn not installed. Please install with: pip install xgboost scikit-learn")
+except Exception as e:
+    print(f"Error during XGBoost forecasting: {e}")
+
+# --- 3. Optimization (Gurobi - Conceptual Python API Usage) ---
+# Gurobi is a commercial solver and requires a license.
+# This section outlines the structure of defining and solving an optimization problem.
+# It is NOT a runnable example without Gurobi installation and a valid license.
+
+print("\n--- Optimization (Gurobi - Conceptual) ---")
+try:
+    import gurobipy as gp
+    from gurobipy import GRB
+
+    # --- Conceptual Vehicle Routing Problem (VRP) ---
+    # Simplified scenario: Optimize routes for a single depot to serve multiple customers.
+
+    # Data for the VRP problem (simplified)
+    # Num customers
+    n_customers = 5
+    # Coordinates for depot (0) and customers (1 to n_customers)
+    coordinates = {
+        0: (0, 0), # Depot
+        1: (1, 5),
+        2: (3, 7),
+        3: (6, 2),
+        4: (8, 4),
+        5: (2, 8)
+    }
+    # Demands of each customer
+    demands = {i: np.random.randint(5, 15) for i in range(1, n_customers + 1)}
+    # Vehicle capacity
+    vehicle_capacity = 30
+    # Cost matrix (Euclidean distance between points)
+    cost = {}
+    for i in range(n_customers + 1):
+        for j in range(n_customers + 1):
+            if i != j:
+                cost[(i, j)] = np.sqrt((coordinates[i][0] - coordinates[j][0])**2 +
+                                       (coordinates[i][1] - coordinates[j][1])**2)
+            else:
+                cost[(i, j)] = 0
+
+    print(f"Conceptual VRP: {n_customers} customers, vehicle capacity {vehicle_capacity}")
+
+    # Create a new model
+    m = gp.Model("VRP_Optimizer")
+
+    # Decision Variables:
+    # x[i,j] = 1 if vehicle travels from node i to node j, 0 otherwise
+    x = m.addVars(cost.keys(), vtype=GRB.BINARY, name="x")
+
+    # u[i] = auxiliary variable for subtour elimination (Montojo-Miller-Tucker formulation)
+    u = m.addVars(n_customers + 1, vtype=GRB.CONTINUOUS, name="u")
+
+    # Objective Function: Minimize total travel cost
+    m.setObjective(gp.quicksum(cost[i,j] * x[i,j] for i,j in cost.keys()), GRB.MINIMIZE)
+
+    # Constraints:
+    # 1. Each customer must be visited exactly once (entering edge)
+    m.addConstrs((gp.quicksum(x[i,j] for i in range(n_customers + 1) if i != j) == 1
+                  for j in range(1, n_customers + 1)), name="visit_in")
+
+    # 2. Each customer must be departed exactly once (outgoing edge)
+    m.addConstrs((gp.quicksum(x[j,i] for i in range(n_customers + 1) if i != j) == 1
+                  for j in range(1, n_customers + 1)), name="visit_out")
+
+    # 3. Flow conservation at depot: vehicles leave and return
+    m.addConstr(gp.quicksum(x[0,j] for j in range(1, n_customers + 1)) == gp.quicksum(x[j,0] for j in range(1, n_customers + 1)), name="depot_flow")
+
+    # 4. Subtour elimination and capacity constraint (simplified for a single vehicle)
+    # For a multi-vehicle VRP, capacity and subtour elimination is more complex.
+    # This is a common form of MTZ subtour elimination for basic VRP, combined with capacity.
+    # If using multiple vehicles, you'd add constraints like `sum(x[i,j] for all j) <= K` for total vehicles
+    # and adjust the subtour elimination to handle vehicle flow and capacity.
+    
+    # Simplified capacity for nodes (not linked directly to edges for simplicity, assumes each node contributes to capacity)
+    # A proper VRP capacity constraint involves tracking load along routes.
+    # m.addConstrs((u[i] - u[j] + n_customers * x[i,j] <= n_customers - 1
+    #               for i in range(1, n_customers + 1) for j in range(1, n_customers + 1) if i != j and i != 0 and j != 0), name="subtour_elim")
+    # m.addConstrs((u[i] >= demands[i] for i in range(1, n_customers + 1)), name="u_lower_bound")
+    # m.addConstrs((u[i] <= vehicle_capacity for i in range(1, n_customers + 1)), name="u_upper_bound")
+
+    # For a proper single-vehicle MTZ (Miller-Tucker-Zemlin) formulation with capacity:
+    # m.addConstrs((u[i] - u[j] + n_customers * x[i,j] <= n_customers - 1
+    #               for i in range(1, n_customers + 1) for j in range(1, n_customers + 1) if i != j), name="subtour_elim")
+    # m.addConstrs((u[i] >= demands[i] for i in range(1, n_customers + 1)), name="capacity_u_lower")
+    # m.addConstrs((u[i] <= vehicle_capacity - demands[i] for i in range(1, n_customers + 1)), name="capacity_u_upper")
+
+
+    # More realistic MTZ for VRP with capacity (requires an index for vehicles, or more complex flow for a single vehicle)
+    # This is a very simplified capacity constraint for a single vehicle VRP for demonstration.
+    # A true VRP capacity constraint is added per route or using flow variables.
+    # m.addConstrs((x[i,j] * demands[i] <= vehicle_capacity for i,j in x.keys() if i != 0 and j != 0), name="capacity_check") # Simplified
+
+    # For a correct multi-vehicle VRP, you'd need multiple 'x' variables (e.g., x[k,i,j] for vehicle k)
+    # and subtour elimination that links demand to vehicle capacity across routes.
+
+    m.optimize()
+
+    if m.status == GRB.OPTIMAL:
+        print("\nOptimal solution found for VRP:")
+        # Reconstruct the routes
+        routes = []
+        for i,j in x.keys():
+            if x[i,j].X > 0.5: # If the variable is active in the solution
+                routes.append((i,j))
+        print("Selected edges:", routes)
+        print("Total cost:", m.ObjVal)
+    elif m.status == GRB.INFEASIBLE:
+        print("Model is infeasible. Check constraints.")
+    elif m.status == GRB.UNBOUNDED:
+        print("Model is unbounded.")
+
+except ImportError:
+    print("\nGurobi Python API not found. Please install Gurobi and its Python package.")
+    print("Note: Gurobi is a commercial solver and requires a license.")
+except Exception as e:
+    print(f"\nAn error occurred during Gurobi optimization: {e}")
+
+# --- 4. Integration Points (Conceptual) ---
+print("\n--- Integration Points (Conceptual) ---")
+print("In a real AI-powered supply chain optimizer, these components would interact:")
+
+print("\n1. Data Ingestion:")
+print("   - Real-time data (telematics, weather, traffic) streamed into a data lake/warehouse.")
+print("   - Historical data (sales, inventory, shipment) from ERP/WMS systems.")
+print("   - Pandas would be used for initial data cleaning and feature engineering.")
+
+print("\n2. Demand Forecasting Service:")
+print("   - Periodically (e.g., daily, weekly) run Prophet or XGBoost models to generate forecasts.")
+print("   - Forecasts are stored in a database (e.g., SQL, NoSQL) or passed to optimization engine.")
+print("   - AWS Forecast could serve as a managed service for this, integrating with S3 for data.")
+
+print("\n3. Optimization Engine (Gurobi-powered):")
+print("   - Receives demand forecasts, current inventory, vehicle availability, and real-time constraints.")
+print("   - Formulates and solves complex VRP, inventory, and facility location problems.")
+print("   - Outputs optimized routes, inventory targets, and resource allocations.")
+print("   - Can be triggered dynamically based on new orders or disruptions.")
+
+print("\n4. Real-time Constraint Handling:")
+print("   - Monitors real-time APIs (traffic, weather) and sensor data (vehicle status).")
+print("   - If a significant disruption occurs, it triggers a re-optimization process.")
+
+print("\n5. Integration with Existing Systems:")
+print("   - Optimized plans are fed via APIs to Logistics Management Systems (LMS) for execution.")
+print("   - Inventory recommendations update Warehouse Management Systems (WMS) and ERP.")
+print("   - Dashboards (e.g., Tableau, Power BI, custom web apps) visualize results and KPIs.")
+
+print("\n6. Continuous Learning:")
+print("   - Actual outcomes (delivery times, sales) are fed back to forecasting models for retraining and improvement.")
