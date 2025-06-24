@@ -1,0 +1,386 @@
+# AI-Powered Music Generator using GANs: Conceptual Python Code
+
+# This code provides conceptual examples for how the technologies
+# (Magenta, TensorFlow, GANs, MIDI Parser) would be used in a
+# Personalized Music Generator.
+
+# IMPORTANT: This is highly simplified and illustrative.
+# A real-world GAN for music generation with mood/genre conditioning
+# requires:
+# - Extensive dataset preparation (thousands of MIDI files, labeled with mood/genre).
+# - Complex GAN architectures (often involving LSTMs/Transformers for sequential data).
+# - Significant computational resources (GPUs) for training.
+# - Deep understanding of music theory for effective feature engineering.
+# - Magenta provides higher-level abstractions and pre-trained models that would
+#   simplify some of these complexities, but building from scratch is a large task.
+
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras import layers, models, optimizers
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Dense, Reshape, Flatten, Embedding, Concatenate
+import mido # A popular MIDI parsing library for Python
+from mido import Message, MidiFile, MidiTrack
+import os
+
+# --- Configuration ---
+# Define possible moods and genres for conditioning the GAN
+MOODS = ["happy", "calm", "intense", "melancholic"]
+GENRES = ["classical", "electronic", "jazz", "ambient"]
+
+# Musical parameters (simplified for conceptualization)
+# In reality, this would be a much richer representation (e.g., one-hot encoded notes, durations, velocities)
+NUM_NOTES = 128 # MIDI notes 0-127
+MAX_SEQUENCE_LENGTH = 16 # Number of notes in a short musical phrase
+LATENT_DIM = 100 # Dimension of the noise vector for the generator
+
+# --- 1. Data Preprocessing (Conceptual MIDI Parser & TensorFlow/NumPy) ---
+# This section demonstrates how MIDI files would be conceptually parsed
+# and converted into a numerical format suitable for a neural network.
+# A real implementation would involve more sophisticated feature extraction
+# (e.g., piano rolls, note-on/note-off events, time-shifted representations).
+
+def parse_midi_to_sequence(midi_file_path: str, sequence_length: int = MAX_SEQUENCE_LENGTH) -> list[list[int]]:
+    """
+    Conceptual MIDI parser.
+    Reads a MIDI file and converts it into a list of note sequences.
+    Simplistic: only extracts note_on messages, ignores duration, velocity for simplicity.
+    A real parser would handle timing, velocity, instrument changes, etc.
+    """
+    try:
+        mid = MidiFile(midi_file_path)
+        all_notes = []
+        for i, track in enumerate(mid.tracks):
+            for msg in track:
+                if msg.type == 'note_on' and msg.velocity > 0: # Only consider note_on with sound
+                    all_notes.append(msg.note)
+        
+        # Split into sequences of fixed length
+        sequences = []
+        for i in range(0, len(all_notes) - sequence_length + 1, sequence_length):
+            sequences.append(all_notes[i : i + sequence_length])
+        
+        return sequences
+    except Exception as e:
+        print(f"Error parsing MIDI file {midi_file_path}: {e}")
+        return []
+
+def preprocess_music_data(midi_files_dir: str) -> np.ndarray:
+    """
+    Conceptually preprocesses a directory of MIDI files for GAN training.
+    In a real scenario, this would also involve conditioning labels (mood/genre).
+    """
+    all_sequences = []
+    print(f"Loading MIDI files from: {midi_files_dir}")
+    for filename in os.listdir(midi_files_dir):
+        if filename.endswith((".mid", ".midi")):
+            filepath = os.path.join(midi_files_dir, filename)
+            sequences = parse_midi_to_sequence(filepath)
+            all_sequences.extend(sequences)
+    
+    if not all_sequences:
+        print("No MIDI sequences found. Please ensure 'midi_data/' contains MIDI files.")
+        # Generate dummy data if no real MIDI files are found for demonstration
+        print("Generating dummy musical data for demonstration...")
+        dummy_sequences = np.random.randint(0, NUM_NOTES, size=(100, MAX_SEQUENCE_LENGTH))
+        return dummy_sequences
+        
+    print(f"Loaded {len(all_sequences)} musical sequences.")
+    return np.array(all_sequences)
+
+# Create a dummy directory for MIDI data if it doesn't exist
+dummy_midi_dir = "midi_data"
+if not os.path.exists(dummy_midi_dir):
+    os.makedirs(dummy_midi_dir)
+    # Create a dummy MIDI file for demonstration
+    mid = MidiFile()
+    track = MidiTrack()
+    mid.tracks.append(track)
+    track.append(Message('program_change', program=0, time=0)) # Acoustic Grand Piano
+    track.append(Message('note_on', note=60, velocity=64, time=0)) # Middle C
+    track.append(Message('note_off', note=60, velocity=64, time=480))
+    track.append(Message('note_on', note=62, velocity=64, time=0)) # D
+    track.append(Message('note_off', note=62, velocity=64, time=480))
+    track.append(Message('note_on', note=64, velocity=64, time=0)) # E
+    track.append(Message('note_off', note=64, velocity=64, time=480))
+    mid.save(os.path.join(dummy_midi_dir, 'dummy_music.mid'))
+    print(f"Created a dummy MIDI file in {dummy_midi_dir}")
+
+
+# Load and preprocess the data
+# In a real setup, `music_data` would contain sequences, and `conditioning_labels`
+# would contain corresponding mood/genre for each sequence.
+music_data = preprocess_music_data(dummy_midi_dir)
+# For CGAN, we also need categorical conditioning inputs
+# Convert numerical note sequences into a one-hot encoding for the GAN input/output
+# e.g., (batch_size, sequence_length, NUM_NOTES)
+music_data_one_hot = tf.keras.utils.to_categorical(music_data, num_classes=NUM_NOTES)
+print(f"Preprocessed music data shape (one-hot): {music_data_one_hot.shape}")
+
+# Create dummy conditioning labels for the conceptual CGAN training
+# These would be derived from the metadata of your actual music dataset
+dummy_mood_labels = np.random.randint(0, len(MOODS), size=(music_data.shape[0],))
+dummy_genre_labels = np.random.randint(0, len(GENRES), size=(music_data.shape[0],))
+print(f"Dummy mood labels shape: {dummy_mood_labels.shape}")
+print(f"Dummy genre labels shape: {dummy_genre_labels.shape}")
+
+# --- 2. GAN Architecture (TensorFlow/Keras with Conditional GAN concept) ---
+# This defines a very basic Conditional GAN (CGAN) for music generation.
+# Real music GANs are far more complex, using recurrent layers (LSTMs, GRUs)
+# or Transformer architectures.
+
+def build_generator(latent_dim: int, num_notes: int, seq_len: int, num_moods: int, num_genres: int) -> Model:
+    """
+    Builds the Generator model for the Conditional GAN.
+    It takes a latent noise vector and conditioning inputs (mood, genre)
+    to generate a musical sequence.
+    """
+    # Input for latent noise vector
+    noise_input = Input(shape=(latent_dim,), name='noise_input')
+
+    # Input for mood condition (categorical)
+    mood_input = Input(shape=(1,), dtype='int332', name='mood_input')
+    mood_embedding = Embedding(num_moods, 50)(mood_input) # Embed mood into a dense vector
+    mood_embedding = Flatten()(mood_embedding)
+
+    # Input for genre condition (categorical)
+    genre_input = Input(shape=(1,), dtype='int32', name='genre_input')
+    genre_embedding = Embedding(num_genres, 50)(genre_input) # Embed genre into a dense vector
+    genre_embedding = Flatten()(genre_embedding)
+
+    # Concatenate noise vector and conditioning embeddings
+    merged_input = Concatenate()([noise_input, mood_embedding, genre_embedding])
+
+    # Generator hidden layers
+    x = Dense(256, activation='relu')(merged_input)
+    x = Dense(512, activation='relu')(x)
+    x = Dense(seq_len * num_notes, activation='tanh')(x) # Output flat sequence, -1 to 1 for notes
+    
+    # Reshape output to represent a musical sequence (e.g., one-hot notes)
+    # The 'softmax' activation in a real scenario would be applied per note position
+    # or a Gumbel-Softmax for discrete sampling. Here, tanh is conceptual.
+    output_sequence = Reshape((seq_len, num_notes))(x)
+
+    model = Model(inputs=[noise_input, mood_input, genre_input], outputs=output_sequence, name='generator')
+    return model
+
+def build_discriminator(num_notes: int, seq_len: int, num_moods: int, num_genres: int) -> Model:
+    """
+    Builds the Discriminator model for the Conditional GAN.
+    It takes a musical sequence and conditioning inputs, and tries to
+    determine if the sequence is real or fake.
+    """
+    # Input for musical sequence
+    sequence_input = Input(shape=(seq_len, num_notes), name='sequence_input')
+    x = Flatten()(sequence_input)
+
+    # Input for mood condition (categorical)
+    mood_input = Input(shape=(1,), dtype='int32', name='mood_input_disc')
+    mood_embedding = Embedding(num_moods, 50)(mood_input)
+    mood_embedding = Flatten()(mood_embedding)
+
+    # Input for genre condition (categorical)
+    genre_input = Input(shape=(1,), dtype='int32', name='genre_input_disc')
+    genre_embedding = Embedding(num_genres, 50)(genre_input)
+    genre_embedding = Flatten()(genre_embedding)
+
+    # Concatenate musical sequence (flattened) and conditioning embeddings
+    merged_input = Concatenate()([x, mood_embedding, genre_embedding])
+
+    # Discriminator hidden layers
+    x = Dense(512, activation='relu')(merged_input)
+    x = Dense(256, activation='relu')(x)
+    output = Dense(1, activation='sigmoid')(x) # Output is a probability (real or fake)
+
+    model = Model(inputs=[sequence_input, mood_input, genre_input], outputs=output, name='discriminator')
+    return model
+
+def build_gan(generator: Model, discriminator: Model) -> Model:
+    """
+    Combines the Generator and Discriminator into a single GAN model for training.
+    """
+    # The discriminator's weights are not trainable during GAN training
+    discriminator.trainable = False
+
+    # Get inputs from the generator
+    noise_input_gan = Input(shape=(LATENT_DIM,), name='noise_input_gan')
+    mood_input_gan = Input(shape=(1,), dtype='int32', name='mood_input_gan')
+    genre_input_gan = Input(shape=(1,), dtype='int32', name='genre_input_gan')
+
+    # Generate fake music
+    fake_music = generator([noise_input_gan, mood_input_gan, genre_input_gan])
+
+    # Classify fake music using the discriminator
+    gan_output = discriminator([fake_music, mood_input_gan, genre_input_gan])
+
+    model = Model(inputs=[noise_input_gan, mood_input_gan, genre_input_gan], outputs=gan_output, name='gan')
+    return model
+
+# --- Instantiate models ---
+print("\n--- Building GAN Models (TensorFlow/Keras) ---")
+discriminator = build_discriminator(NUM_NOTES, MAX_SEQUENCE_LENGTH, len(MOODS), len(GENRES))
+discriminator.compile(loss='binary_crossentropy', optimizer=optimizers.Adam(learning_rate=0.0002, beta_1=0.5), metrics=['accuracy'])
+discriminator.summary()
+
+generator = build_generator(LATENT_DIM, NUM_NOTES, MAX_SEQUENCE_LENGTH, len(MOODS), len(GENRES))
+generator.summary()
+
+# Build the combined GAN model
+gan = build_gan(generator, discriminator)
+gan.compile(loss='binary_crossentropy', optimizer=optimizers.Adam(learning_rate=0.0002, beta_1=0.5))
+gan.summary()
+
+# --- Conceptual Training Loop (Simplified) ---
+def train_gan(generator: Model, discriminator: Model, gan: Model, music_data: np.ndarray,
+              mood_labels: np.ndarray, genre_labels: np.ndarray, epochs: int = 1000, batch_size: int = 64):
+    """
+    Conceptual training loop for the GAN.
+    A real training loop would include saving models, monitoring metrics,
+    and more sophisticated sampling.
+    """
+    print("\n--- Starting Conceptual GAN Training ---")
+    half_batch = batch_size // 2
+
+    for epoch in range(epochs):
+        # --- Train Discriminator ---
+        # Select a random half_batch of real music data
+        idx = np.random.randint(0, music_data.shape[0], half_batch)
+        real_sequences = music_data[idx]
+        real_moods = mood_labels[idx]
+        real_genres = genre_labels[idx]
+
+        # Generate a half_batch of fake music
+        noise = np.random.normal(0, 1, (half_batch, LATENT_DIM))
+        fake_moods = np.random.randint(0, len(MOODS), half_batch)
+        fake_genres = np.random.randint(0, len(GENRES), half_batch)
+        fake_sequences = generator.predict([noise, fake_moods, fake_genres], verbose=0)
+
+        # Train the discriminator on real and fake data
+        d_loss_real = discriminator.train_on_batch([real_sequences, real_moods, real_genres], np.ones((half_batch, 1)))
+        d_loss_fake = discriminator.train_on_batch([fake_sequences, fake_moods, fake_genres], np.zeros((half_batch, 1)))
+        d_loss = 0.5 * np.add(d_loss_real, d_loss_fake)
+
+        # --- Train Generator ---
+        # Generate noise and random conditions for the generator to fool the discriminator
+        noise = np.random.normal(0, 1, (batch_size, LATENT_DIM))
+        gen_moods = np.random.randint(0, len(MOODS), batch_size)
+        gen_genres = np.random.randint(0, len(GENRES), batch_size)
+
+        # Train the GAN (generator tries to produce 'real' output)
+        g_loss = gan.train_on_batch([noise, gen_moods, gen_genres], np.ones((batch_size, 1)))
+
+        # Print progress
+        if epoch % 100 == 0:
+            print(f"Epoch {epoch}/{epochs} | D Loss: {d_loss[0]:.4f} (Acc: {100*d_loss[1]:.2f}%) | G Loss: {g_loss:.4f}")
+            # Optionally save generator model weights
+            # generator.save_weights("generator_weights.h5")
+
+    print("\n--- Conceptual GAN Training Finished ---")
+    # Save the trained generator for music generation
+    generator.save("music_generator_model.h5")
+    print("Generator model saved as 'music_generator_model.h5'")
+
+
+# Run conceptual training if enough data is available
+if music_data.shape[0] > 0:
+    train_gan(generator, discriminator, gan, music_data_one_hot, dummy_mood_labels, dummy_genre_labels)
+else:
+    print("Not enough music data to start conceptual GAN training.")
+
+
+# --- 3. Music Generation & Output (Magenta/MIDI Parser) ---
+# This section shows how to use the trained generator to create new music
+# and convert it to a MIDI file.
+print("\n--- Music Generation & Output ---")
+
+def generate_and_save_music(generator_model: Model, mood: str, genre: str, output_filename: str = "generated_music.mid"):
+    """
+    Generates a musical sequence based on mood and genre, and saves it as a MIDI file.
+    """
+    if mood not in MOODS:
+        print(f"Invalid mood: {mood}. Choose from {MOODS}")
+        return
+    if genre not in GENRES:
+        print(f"Invalid genre: {genre}. Choose from {GENRES}")
+        return
+
+    mood_idx = MOODS.index(mood)
+    genre_idx = GENRES.index(genre)
+
+    # Generate noise vector
+    noise = np.random.normal(0, 1, (1, LATENT_DIM))
+
+    # Generate sequence using the generator
+    # Need to reshape mood/genre indices to (1,) for the model input
+    generated_sequence_one_hot = generator.predict(
+        [noise, np.array([mood_idx]), np.array([genre_idx])], verbose=0
+    )[0] # Take the first (and only) batch item
+
+    # Convert one-hot encoded output back to note numbers
+    # For a 'tanh' output, this step needs proper interpretation (e.g., thresholding, argmax)
+    # For categorical output, it would be argmax directly.
+    # Here, we'll just take the argmax as if it were a probability distribution.
+    generated_notes = np.argmax(generated_sequence_one_hot, axis=-1)
+
+    print(f"Generated a musical sequence ({mood}, {genre}): {generated_notes}")
+
+    # Convert generated notes to MIDI file using Mido
+    mid = MidiFile()
+    track = MidiTrack()
+    mid.tracks.append(track)
+
+    track.append(Message('program_change', program=0, time=0)) # Set instrument (e.g., Acoustic Grand Piano)
+
+    # Convert note sequence to MIDI messages
+    # This is highly simplified: assumes constant note duration and velocity
+    # A real system would generate these parameters as well.
+    for note in generated_notes:
+        # Ensure note is within valid MIDI range
+        note = int(np.clip(note, 0, 127))
+        track.append(Message('note_on', note=note, velocity=64, time=0)) # Note on immediately
+        track.append(Message('note_off', note=note, velocity=64, time=240)) # Note off after 240 ticks (e.g., quarter note)
+
+    mid.save(output_filename)
+    print(f"Generated music saved to: {output_filename}")
+
+
+# --- Example Usage for Generation ---
+# Load the trained generator model
+try:
+    loaded_generator = models.load_model("music_generator_model.h5")
+    print("\n--- Generating Music Samples ---")
+    generate_and_save_music(loaded_generator, mood="happy", genre="classical", output_filename="happy_classical.mid")
+    generate_and_save_music(loaded_generator, mood="melancholic", genre="ambient", output_filename="melancholic_ambient.mid")
+except Exception as e:
+    print(f"\nError loading generator model or generating music: {e}")
+    print("Ensure GAN training completed successfully and 'music_generator_model.h5' exists.")
+
+# --- Conceptual Integration with Magenta ---
+# Magenta provides higher-level APIs and pre-trained models.
+# Instead of building GANs from scratch, you might use Magenta's models.
+# Example (conceptual, requires Magenta installation: pip install magenta)
+# from magenta.models.music_vae import configs, MusicVAE # MusicVAE is a VAE, not GAN
+# from magenta.music import note_sequence_to_midi_file
+# from magenta.music import midi_to_note_sequence
+
+# def generate_with_magenta_model(model_name: str, config_name: str, temperature: float = 0.5):
+#     """
+#     Conceptual function to generate music using a pre-trained Magenta model.
+#     This would abstract away the GAN/VAE details.
+#     """
+#     print(f"\n--- Conceptual Generation with Magenta ({model_name}) ---")
+#     try:
+#         # config = configs.CONFIG_MAP[config_name]
+#         # model = MusicVAE(config) # Or other Magenta models like PerformanceRNN
+#         # model.load_checkpoint(tf.train.latest_checkpoint(os.path.expanduser('~/magenta-models/'))) # Load pre-trained checkpoint
+#         
+#         # Simplified: Magenta's `generate` function would handle the actual model inference
+#         # generated_sequence = model.sample(num_samples=1, length=256, temperature=temperature)
+#         
+#         # Assuming `generated_sequence` is a NoteSequence object from Magenta
+#         # note_sequence_to_midi_file(generated_sequence[0], "magenta_generated.mid")
+#         print(f"Magenta model '{model_name}' would generate music here and save to midi.")
+#     except Exception as e:
+#         print(f"Error using Magenta model: {e}. Ensure Magenta and its models are set up correctly.")
+
+# generate_with_magenta_model(model_name="MusicVAE", config_name="basic_rnn", temperature=0.8) # Conceptual call
