@@ -1,0 +1,465 @@
+1. Data Ingestion & Initial Setup (Conceptual ELK + Snort)
+This part primarily involves configuration files rather than Python code, setting up Snort to log to a format Logstash can pick up, and configuring Logstash to send data to Elasticsearch.
+
+a. Snort Configuration (snippet of snort.conf or local.rules):
+
+# Example Snort rule for basic detection (e.g., suspicious port scan)
+# This would feed into Logstash for more advanced ML analysis
+alert tcp any any -> any 22 (msg:"ET SCAN Potential SSH BruteForce on Standard Port"; sid:2000001; rev:2;)
+
+# Configure Snort to log alerts in a format Logstash can parse (e.g., JSON or syslog)
+# Output plugin configuration example (simplified for demonstration)
+# For real deployments, you'd use unified2 or JSON output.
+# output alert_syslog: LOG_AUTH LOG_ALERT
+b. Logstash Configuration (logstash.conf - simplified):
+
+JSON
+
+input {
+  # Example: Reading Snort alerts from a file (or syslog, beats)
+  file {
+    path => "/var/log/snort/alert"  # Adjust path as per Snort's output
+    start_position => "beginning"
+    sincedb_path => "/dev/null" # For testing, start from beginning every time
+    type => "snort_alert"
+  }
+  # Example: Receiving NetFlow/IPFIX data (e.g., from a network sensor)
+  udp {
+    port => 2055
+    codec => netflow {
+      versions => [5, 9]
+    }
+    type => "netflow"
+  }
+  # Example: Receiving data from Filebeat (installed on endpoints/servers)
+  beats {
+    port => 5044
+  }
+}
+
+filter {
+  if [type] == "snort_alert" {
+    # Basic grok parsing for Snort alerts (adjust based on actual Snort output format)
+    grok {
+      match => { "message" => "%{TIMESTAMP_ISO8601:timestamp}  \[%{INT:generator_id}:%{INT:signature_id}:%{INT:signature_revision}\] %{GREEDYDATA:alert_message} \[Classification: %{GREEDYDATA:classification}\] \[Priority: %{INT:priority}\] %{IP:src_ip}:%{INT:src_port} -> %{IP:dest_ip}:%{INT:dest_port}" }
+    }
+    mutate {
+      add_field => { "event_type" => "snort_alert" }
+    }
+  }
+
+  if [type] == "netflow" {
+    # NetFlow data typically already structured by the codec
+    mutate {
+      add_field => { "event_type" => "network_flow" }
+    }
+  }
+
+  # Add common fields for all events for consistent ML feature extraction
+  mutate {
+    add_field => { "processed_at" => "%{+YYYY-MM-dd'T'HH:mm:ss.SSSZ}" }
+    convert => {
+      "src_port" => "integer"
+      "dest_port" => "integer"
+      "priority" => "integer"
+      # ... other numerical features needed for ML
+    }
+  }
+}
+
+output {
+  elasticsearch {
+    hosts => ["http://localhost:9200"] # Your Elasticsearch host
+    index => "cybersecurity-events-%{+YYYY.MM.dd}"
+  }
+  # For debugging, also print to stdout
+  stdout { codec => rubydebug }
+}
+2. Machine Learning Model Training (Python - Scikit-learn & Keras)
+This would be an offline process, where you train your models on historical, labeled datasets (or datasets you've manually labeled with Wireshark).
+
+a. Feature Engineering (Conceptual - using Pandas for demonstration):
+
+Python
+
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+
+def load_and_preprocess_data(filepath="network_traffic_dataset.csv"):
+    # In a real scenario, this would come from a data lake/warehouse,
+    # often derived from Elastic data or PCAP analysis.
+    try:
+        df = pd.read_csv(filepath)
+    except FileNotFoundError:
+        print(f"Dataset not found at {filepath}. Please provide a valid path or generate synthetic data.")
+        # Generate synthetic data for demonstration if file not found
+        data = {
+            'src_ip': [f'192.168.1.{i}' for i in range(100)] * 10,
+            'dest_ip': [f'10.0.0.{i}' for i in range(100)] * 10,
+            'src_port': np.random.randint(1024, 65535, 1000),
+            'dest_port': np.random.randint(1, 10000, 1000),
+            'protocol': np.random.choice(['TCP', 'UDP', 'ICMP'], 1000),
+            'packet_len': np.random.normal(1500, 500, 1000).astype(int),
+            'flow_duration': np.random.normal(10, 5, 1000),
+            'num_packets': np.random.randint(5, 200, 1000),
+            'num_bytes': np.random.normal(10000, 5000, 1000).astype(int),
+            'is_anomaly': np.random.choice([0, 1], 1000, p=[0.95, 0.05]) # 5% anomalies
+        }
+        df = pd.DataFrame(data)
+        # Introduce some clear anomalies for demonstration
+        df.loc[df.index[::50], 'dest_port'] = 8080 # Unusual port
+        df.loc[df.index[::70], 'packet_len'] = 10000 # Very large packet
+        df.loc[df.index[::90], 'flow_duration'] = 0.1 # Very short flow
+        df.loc[df.index[::100], 'is_anomaly'] = 1 # Explicitly mark
+        print("Generated synthetic data.")
+
+    # Convert categorical features to numerical (one-hot encoding)
+    df = pd.get_dummies(df, columns=['protocol'], prefix='protocol')
+
+    # Drop non-numeric or irrelevant features for ML (e.g., IPs for simple models, if not using IP reputation)
+    features_df = df.drop(columns=['src_ip', 'dest_ip', 'is_anomaly'], errors='ignore')
+
+    # Apply scaling
+    scaler = StandardScaler()
+    scaled_features = scaler.fit_transform(features_df)
+    
+    # Store scaler for later use in real-time inference
+    import joblib
+    joblib.dump(scaler, 'scaler.pkl')
+
+    return scaled_features, df['is_anomaly'].values if 'is_anomaly' in df.columns else None, features_df.columns
+
+# Example Usage:
+# X, y, feature_names = load_and_preprocess_data("your_network_traffic_dataset.csv")
+# Or to generate synthetic data:
+X, y, feature_names = load_and_preprocess_data()
+
+print(f"Dataset shape: {X.shape}")
+if y is not None:
+    print(f"Anomaly distribution: {np.bincount(y)}")
+
+b. Scikit-learn (Isolation Forest for Anomaly Detection):
+
+Python
+
+from sklearn.ensemble import IsolationForest
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+
+def train_isolation_forest(X_train):
+    """
+    Trains an Isolation Forest model for unsupervised anomaly detection.
+    """
+    # contamination is the proportion of outliers in the data set (estimate)
+    # Adjust based on your expected anomaly rate
+    model = IsolationForest(n_estimators=100, contamination=0.01, random_state=42)
+    model.fit(X_train)
+    
+    import joblib
+    joblib.dump(model, 'isolation_forest_model.pkl')
+    print("Isolation Forest model trained and saved.")
+    return model
+
+if y is not None: # Only if we have labeled data for evaluation
+    X_train_if, X_test_if, y_train_if, y_test_if = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
+    if_model = train_isolation_forest(X_train_if)
+
+    # Predict anomalies (returns -1 for outliers, 1 for inliers)
+    y_pred_if = if_model.predict(X_test_if)
+    # Convert predictions to 0 (normal) and 1 (anomaly) for evaluation
+    y_pred_if_binary = np.where(y_pred_if == -1, 1, 0)
+
+    print("\n--- Isolation Forest Evaluation ---")
+    print(confusion_matrix(y_test_if, y_pred_if_binary))
+    print(classification_report(y_test_if, y_pred_if_binary, target_names=['Normal', 'Anomaly']))
+    try:
+        print(f"ROC AUC: {roc_auc_score(y_test_if, if_model.decision_function(X_test_if) * -1)}") # decision_function score for AUC
+    except ValueError:
+        print("ROC AUC not applicable for single-class labels in test set.")
+else:
+    print("\nNo labeled data for Isolation Forest evaluation. Skipping evaluation.")
+    # Train anyway if you want an unsupervised model
+    if_model = train_isolation_forest(X)
+
+c. Keras (Autoencoder for Deep Anomaly Detection):
+
+Python
+
+from tensorflow import keras
+from tensorflow.keras import layers
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error
+
+def train_autoencoder(X_train_normal):
+    """
+    Trains a simple autoencoder for anomaly detection.
+    Assumes X_train_normal contains primarily normal data.
+    """
+    # Normalize data for neural networks
+    scaler_nn = MinMaxScaler()
+    X_train_normal_scaled = scaler_nn.fit_transform(X_train_normal)
+    
+    # Store scaler for later use in real-time inference
+    import joblib
+    joblib.dump(scaler_nn, 'autoencoder_scaler.pkl')
+
+    input_dim = X_train_normal_scaled.shape[1]
+    encoding_dim = int(input_dim / 2) # Latent space dimension
+
+    # Build the Autoencoder model
+    input_layer = keras.Input(shape=(input_dim,))
+    encoder = layers.Dense(encoding_dim, activation="relu")(input_layer)
+    # Add more layers for deeper autoencoders if needed
+    decoder = layers.Dense(input_dim, activation="sigmoid")(encoder) # Sigmoid for normalized output
+
+    autoencoder = keras.Model(inputs=input_layer, outputs=decoder)
+    autoencoder.compile(optimizer='adam', loss='mse') # Mean Squared Error for reconstruction loss
+
+    # Train the autoencoder
+    history = autoencoder.fit(X_train_normal_scaled, X_train_normal_scaled,
+                              epochs=50,
+                              batch_size=32,
+                              shuffle=True,
+                              validation_split=0.1, # Use a part of training data for validation
+                              verbose=0) # Set to 1 for more verbose output
+
+    autoencoder.save('autoencoder_model.h5')
+    print("Autoencoder model trained and saved.")
+    return autoencoder, scaler_nn
+
+if y is not None:
+    # For autoencoder, typically train on 'normal' data only
+    X_normal = X[y == 0]
+    if X_normal.shape[0] > 0:
+        X_train_ae, X_test_ae = train_test_split(X_normal, test_size=0.2, random_state=42)
+        autoencoder_model, ae_scaler = train_autoencoder(X_train_ae)
+
+        # Evaluate Autoencoder on test set (both normal and anomalous for evaluation)
+        X_eval_scaled = ae_scaler.transform(X) # Scale the full dataset for evaluation
+        reconstructions = autoencoder_model.predict(X_eval_scaled)
+        mse = np.mean(np.power(X_eval_scaled - reconstructions, 2), axis=1)
+
+        # Determine a threshold for anomaly detection (e.g., based on percentile of MSE on normal data)
+        threshold = np.percentile(mse[y == 0], 99) # 99th percentile of reconstruction error for normal data
+        print(f"Autoencoder Anomaly Threshold (MSE): {threshold}")
+
+        y_pred_ae = (mse > threshold).astype(int)
+
+        print("\n--- Autoencoder Evaluation ---")
+        print(confusion_matrix(y, y_pred_ae))
+        print(classification_report(y, y_pred_ae, target_names=['Normal', 'Anomaly']))
+        try:
+            print(f"ROC AUC: {roc_auc_score(y, mse)}")
+        except ValueError:
+            print("ROC AUC not applicable for single-class labels in test set.")
+    else:
+        print("\nNo normal data found to train autoencoder. Skipping autoencoder training and evaluation.")
+else:
+    print("\nNo labeled data for Autoencoder evaluation. Skipping evaluation.")
+    # If no labeled data, assume all data is for training autoencoder
+    if X.shape[0] > 0:
+        autoencoder_model, ae_scaler = train_autoencoder(X)
+    else:
+        print("No data available for autoencoder training.")
+3. Real-time Inference & Automated Response (Python)
+This component would ideally run as a service, continuously querying Elasticsearch or receiving data from a stream processing system.
+
+a. Real-time Anomaly Detection Service (Conceptual):
+
+Python
+
+import time
+from elasticsearch import Elasticsearch
+import json
+import joblib
+from tensorflow import keras
+
+# Load pre-trained models and scalers
+try:
+    isolation_forest_model = joblib.load('isolation_forest_model.pkl')
+    isolation_forest_scaler = joblib.load('scaler.pkl') # Same scaler used for initial feature processing
+    
+    autoencoder_model = keras.models.load_model('autoencoder_model.h5')
+    autoencoder_scaler = joblib.load('autoencoder_scaler.pkl')
+    
+    # Load feature names (from the training phase) to ensure consistent feature order
+    _, _, feature_names_list = load_and_preprocess_data() # Reload just for feature names
+    
+    print("All models and scalers loaded successfully.")
+except Exception as e:
+    print(f"Error loading models/scalers: {e}. Ensure training script ran successfully.")
+    isolation_forest_model = None
+    autoencoder_model = None
+    isolation_forest_scaler = None
+    autoencoder_scaler = None
+    feature_names_list = []
+
+# Connect to Elasticsearch
+es = Elasticsearch([{'host': 'localhost', 'port': 9200, 'scheme': 'http'}]) # Adjust host/port as needed
+
+def extract_features_from_es_hit(hit, feature_names, scaler):
+    """
+    Extracts and scales numerical features from an Elasticsearch hit.
+    This function needs to mirror the feature engineering done during training.
+    """
+    data = hit['_source']
+    
+    # Basic feature extraction (needs to be comprehensive and match training)
+    features = {}
+    for feature in feature_names:
+        if feature in data:
+            features[feature] = data[feature]
+        elif feature.startswith('protocol_') and feature.replace('protocol_', '') == data.get('protocol'):
+            features[feature] = 1 # One-hot encoded protocol
+        elif feature.startswith('protocol_'):
+            features[feature] = 0 # Other one-hot encoded protocols
+        else:
+            features[feature] = 0 # Default value for missing features, be careful!
+
+    # Create a DataFrame for consistent scaling and prediction
+    feature_vector = pd.DataFrame([features], columns=feature_names)
+    
+    # Ensure correct order and handle missing features with zeros if necessary
+    for col in feature_names:
+        if col not in feature_vector.columns:
+            feature_vector[col] = 0
+
+    return scaler.transform(feature_vector)
+
+
+def automate_response(alert_details):
+    """
+    Placeholder for automated response actions.
+    In a real system, this would interact with firewalls, SOAR platforms, etc.
+    """
+    print(f"--- AUTOMATED RESPONSE TRIGGERED ---")
+    print(f"Threat detected: {alert_details['message']}")
+    print(f"Severity: {alert_details['severity']}")
+    print(f"Source IP: {alert_details.get('src_ip', 'N/A')}")
+    
+    # Example actions (conceptual):
+    if alert_details['severity'] == 'CRITICAL' and alert_details.get('src_ip'):
+        print(f"ACTION: Blocking IP {alert_details['src_ip']} on firewall (simulated).")
+        # Example: call firewall API, or execute a script
+        # subprocess.run(["sudo", "iptables", "-A", "INPUT", "-s", alert_details['src_ip'], "-j", "DROP"])
+    elif alert_details['severity'] == 'HIGH':
+        print(f"ACTION: Raising high-priority ticket in SIEM (simulated).")
+        # Example: integrate with Jira, ServiceNow, etc.
+    else:
+        print(f"ACTION: Logging alert to SIEM dashboard (simulated).")
+
+def real_time_threat_detection():
+    print("Starting real-time threat detection...")
+    last_check_time = None
+
+    while True:
+        try:
+            query = {
+                "range": {
+                    "processed_at": {
+                        "gte": "now-5s", # Look for events in the last 5 seconds
+                        "lt": "now"
+                    }
+                }
+            }
+            if last_check_time:
+                query["range"]["processed_at"]["gte"] = last_check_time
+            
+            # Fetch new events from Elasticsearch
+            resp = es.search(index="cybersecurity-events-*", body={"query": query, "size": 100})
+            
+            new_events_count = 0
+            for hit in resp['hits']['hits']:
+                new_events_count += 1
+                event_source = hit['_source']
+                
+                print(f"\nProcessing event: {event_source.get('alert_message', event_source.get('event_type', 'unknown'))}")
+                
+                # --- Apply Anomaly Detection Models ---
+                if isolation_forest_model and feature_names_list and isolation_forest_scaler:
+                    try:
+                        feature_vector_if = extract_features_from_es_hit(hit, feature_names_list, isolation_forest_scaler)
+                        if feature_vector_if is not None:
+                            if_prediction = isolation_forest_model.predict(feature_vector_if)[0]
+                            if if_prediction == -1: # -1 indicates anomaly
+                                anomaly_score_if = isolation_forest_model.decision_function(feature_vector_if)[0]
+                                print(f"  [Isolation Forest] ANOMALY DETECTED! Score: {anomaly_score_if:.4f}")
+                                automate_response({
+                                    "message": f"Isolation Forest Anomaly: {event_source.get('alert_message', event_source.get('event_type', 'raw network event'))}",
+                                    "severity": "HIGH",
+                                    "src_ip": event_source.get('src_ip')
+                                })
+                            else:
+                                print("  [Isolation Forest] Normal.")
+                    except Exception as e:
+                        print(f"  Error with Isolation Forest prediction: {e}")
+
+                if autoencoder_model and feature_names_list and autoencoder_scaler:
+                    try:
+                        feature_vector_ae = extract_features_from_es_hit(hit, feature_names_list, autoencoder_scaler)
+                        if feature_vector_ae is not None:
+                            reconstruction = autoencoder_model.predict(feature_vector_ae, verbose=0)
+                            mse = np.mean(np.power(feature_vector_ae - reconstruction, 2), axis=1)[0]
+                            # Using a fixed threshold from training for simplicity
+                            # In real-time, you might use a dynamic threshold
+                            threshold = 0.05 # Example threshold, derived from training
+                            if mse > threshold:
+                                print(f"  [Autoencoder] ANOMALY DETECTED! Reconstruction Error (MSE): {mse:.4f} (Threshold: {threshold:.4f})")
+                                automate_response({
+                                    "message": f"Autoencoder Anomaly: High reconstruction error for {event_source.get('event_type')}",
+                                    "severity": "MEDIUM",
+                                    "src_ip": event_source.get('src_ip')
+                                })
+                            else:
+                                print(f"  [Autoencoder] Normal. MSE: {mse:.4f}")
+                    except Exception as e:
+                        print(f"  Error with Autoencoder prediction: {e}")
+
+            if new_events_count == 0:
+                print("No new events in the last 5 seconds. Waiting...")
+            
+            last_check_time = "now" # Update last check time
+            time.sleep(5) # Check every 5 seconds
+
+        except Exception as e:
+            print(f"An error occurred in real-time detection loop: {e}")
+            time.sleep(10) # Wait longer on error to avoid rapid retries
+
+
+if __name__ == "__main__":
+    # This section would typically be run as a separate service or a cron job.
+    # For demonstration, you'd need Elasticsearch running and Logstash feeding it data.
+    print("Starting ML model training first (simulated on synthetic data)...")
+    X_data, y_labels, feature_cols = load_and_preprocess_data()
+    
+    if X_data is not None:
+        if_model_trained = train_isolation_forest(X_data)
+        
+        # Split data for autoencoder to get normal instances
+        if y_labels is not None and np.any(y_labels == 0):
+            X_normal_ae_train = X_data[y_labels == 0]
+            ae_model_trained, ae_scaler_trained = train_autoencoder(X_normal_ae_train)
+        else:
+            print("Cannot train Autoencoder: No normal samples identified in synthetic data for training.")
+    else:
+        print("Skipping ML model training due to data loading error.")
+
+    print("\n--- Simulating Real-time Threat Detection ---")
+    print("NOTE: For actual real-time execution, ensure Snort, Logstash, and Elasticsearch are running and feeding data.")
+    print("This script will attempt to connect to Elasticsearch and process data.")
+    print("Consider running this as a separate process in a real environment.")
+    
+    # You would need to simulate adding data to Elasticsearch for this to show results
+    # A simple way to test:
+    # 1. Run ELK stack.
+    # 2. Configure Logstash to read from a file.
+    # 3. Manually append some "normal" and "anomalous" log entries to that file.
+    # 4. Run this `real_time_threat_detection()` function.
+    
+    # For this demonstration, we'll just show the structure.
+    # You would uncomment and run real_time_threat_detection() in a live setup.
+    # real_time_threat_detection()
+    print("\nReal-time detection loop initiated. Check your Elasticsearch/Kibana for data, or manually feed it.")
+    print("To stop, use Ctrl+C.")
